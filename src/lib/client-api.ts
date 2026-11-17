@@ -37,8 +37,10 @@ import {
 } from '@/lib/external-mods';
 import {
   clearGitHubGistSettings,
+  isGistAutoSyncEnabled,
   pullDatabaseFromGist,
   pushDatabaseToGist,
+  setGistAutoSyncEnabled,
   verifyAndSaveGitHubToken,
 } from '@/lib/gist-sync';
 import { buildMrpackArchive } from '@/lib/mrpack';
@@ -519,6 +521,7 @@ export async function handleApiRequest(
           curseforgeConfigured: Boolean(cfKey),
           curseforgeKeyMasked: maskKey(cfKey),
           githubGistConfigured: Boolean(ghPat),
+          githubGistAutoSync: isGistAutoSyncEnabled(),
           githubGistUser: getSetting('github_gist_user') ?? '',
           githubGistId: getSetting('github_gist_id') ?? '',
           githubGistSyncedAt: getSetting('github_gist_synced_at') ?? '',
@@ -532,6 +535,7 @@ export async function handleApiRequest(
           curseforgeApiKey?: string;
           githubToken?: string;
           gistId?: string;
+          enabled?: boolean;
           snapshot?: Partial<DatabaseSnapshot>;
         };
 
@@ -561,8 +565,17 @@ export async function handleApiRequest(
           return jsonResponse({
             ok: true,
             githubGistConfigured: true,
+            githubGistAutoSync: isGistAutoSyncEnabled(),
             githubGistUser: info.username,
             githubGistId: info.gistId,
+          });
+        }
+
+        if (body.action === 'set_github_auto_sync') {
+          setGistAutoSyncEnabled(Boolean(body.enabled));
+          return jsonResponse({
+            ok: true,
+            githubGistAutoSync: isGistAutoSyncEnabled(),
           });
         }
 
@@ -571,6 +584,7 @@ export async function handleApiRequest(
           return jsonResponse({
             ok: true,
             githubGistConfigured: false,
+            githubGistAutoSync: false,
             githubGistUser: '',
             githubGistId: '',
             githubGistSyncedAt: '',

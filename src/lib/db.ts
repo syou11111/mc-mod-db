@@ -183,6 +183,14 @@ let snapshotState: DatabaseSnapshot = createEmptySnapshot(true);
 const memorySettings = new Map<string, string>();
 let initPromise: Promise<void> | null = null;
 let persistChain: Promise<void> = Promise.resolve();
+const mutationListeners = new Set<() => void>();
+
+export function subscribeDbMutations(listener: () => void): () => void {
+  mutationListeners.add(listener);
+  return () => {
+    mutationListeners.delete(listener);
+  };
+}
 
 function openIndexedDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -232,7 +240,16 @@ async function writeSnapshotToIndexedDb(snapshot: DatabaseSnapshot): Promise<voi
   });
 }
 
-function schedulePersist(): Promise<void> {
+function schedulePersist(notifyAutoSync = true): Promise<void> {
+  if (notifyAutoSync && typeof window !== 'undefined') {
+    for (const listener of mutationListeners) {
+      try {
+        listener();
+      } catch {
+        // ignore listener errors
+      }
+    }
+  }
   if (typeof globalThis.indexedDB === 'undefined') {
     return Promise.resolve();
   }
@@ -356,7 +373,7 @@ export async function importDatabaseSnapshot(
     throw new Error('有効なデータベースJSON形式ではありません');
   }
   snapshotState = normalizeSnapshot(raw);
-  await schedulePersist();
+  await schedulePersist(false);
   return getDbStats();
 }
 

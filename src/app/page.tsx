@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
+  Cloud,
   Database,
   ExternalLink,
   Filter,
@@ -37,6 +38,7 @@ import { DiscoverPanel } from '@/components/DiscoverPanel';
 import { PresetsPanel } from '@/components/PresetsPanel';
 import { SettingsModal } from '@/components/SettingsModal';
 import { TagHierarchyModal } from '@/components/TagHierarchyModal';
+import { GIST_SYNC_EVENT, type GistSyncEventDetail } from '@/lib/gist-sync';
 import type {
   ModRecord,
   ModSide,
@@ -64,6 +66,42 @@ export default function HomePage() {
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tagHierarchyOpen, setTagHierarchyOpen] = useState(false);
+  const [gistConfigured, setGistConfigured] = useState(false);
+  const [gistAutoSync, setGistAutoSync] = useState(false);
+  const [gistSyncState, setGistSyncState] = useState<GistSyncEventDetail>({
+    status: 'idle',
+  });
+
+  const refreshSyncConfig = useCallback(async () => {
+    try {
+      const res = await fetch('/api/settings');
+      if (!res.ok) return;
+      const data = await res.json();
+      setGistConfigured(Boolean(data.githubGistConfigured));
+      setGistAutoSync(Boolean(data.githubGistAutoSync));
+      if (data.githubGistSyncedAt) {
+        setGistSyncState((prev) =>
+          prev.status === 'idle'
+            ? { status: 'synced', syncedAt: data.githubGistSyncedAt }
+            : prev
+        );
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshSyncConfig();
+    const onSyncEvent = (e: Event) => {
+      const custom = e as CustomEvent<GistSyncEventDetail>;
+      if (custom.detail) {
+        setGistSyncState(custom.detail);
+      }
+    };
+    window.addEventListener(GIST_SYNC_EVENT, onSyncEvent);
+    return () => window.removeEventListener(GIST_SYNC_EVENT, onSyncEvent);
+  }, [refreshSyncConfig]);
 
   // Header quick URL import
   const [quickUrl, setQuickUrl] = useState('');
@@ -532,6 +570,49 @@ export default function HomePage() {
                 登録
               </button>
             </form>
+
+            {gistConfigured && (
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(true)}
+                title={
+                  gistSyncState.error ||
+                  (gistAutoSync
+                    ? 'GitHub Gist 自動保存が有効です（変更の数秒後に自動Push）'
+                    : 'GitHub Gist 連携中（自動保存OFF）')
+                }
+                className={`hidden sm:inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition ${
+                  gistSyncState.status === 'error'
+                    ? 'border-rose-500/40 bg-rose-500/10 text-rose-200'
+                    : gistSyncState.status === 'syncing' ||
+                        gistSyncState.status === 'pending'
+                      ? 'border-sky-500/40 bg-sky-500/10 text-sky-200'
+                      : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                }`}
+              >
+                {gistSyncState.status === 'syncing' ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Cloud className="h-3 w-3" />
+                )}
+                {gistSyncState.status === 'syncing'
+                  ? 'Gist保存中...'
+                  : gistSyncState.status === 'pending'
+                    ? 'Gist同期待機'
+                    : gistSyncState.status === 'error'
+                      ? 'Gist保存エラー'
+                      : gistSyncState.syncedAt
+                        ? `${gistAutoSync ? '自動保存' : '同期'} ${new Date(
+                            gistSyncState.syncedAt
+                          ).toLocaleTimeString('ja-JP', {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}`
+                        : gistAutoSync
+                          ? 'Gist自動保存ON'
+                          : 'Gist連携中'}
+              </button>
+            )}
 
             <button
               type="button"
@@ -1413,7 +1494,10 @@ export default function HomePage() {
       <SettingsModal
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        onSaved={fetchMods}
+        onSaved={() => {
+          fetchMods();
+          void refreshSyncConfig();
+        }}
       />
     </div>
   );

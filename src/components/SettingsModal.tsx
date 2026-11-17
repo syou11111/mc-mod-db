@@ -26,6 +26,7 @@ export function SettingsModal({ open, onClose, onSaved }: SettingsModalProps) {
   const [configured, setConfigured] = useState(false);
 
   const [ghConfigured, setGhConfigured] = useState(false);
+  const [ghAutoSync, setGhAutoSync] = useState(true);
   const [ghUser, setGhUser] = useState('');
   const [ghToken, setGhToken] = useState('');
   const [gistIdInput, setGistIdInput] = useState('');
@@ -52,6 +53,11 @@ export function SettingsModal({ open, onClose, onSaved }: SettingsModalProps) {
       setConfigured(Boolean(data.curseforgeConfigured));
       setMasked(data.curseforgeKeyMasked ?? '');
       setGhConfigured(Boolean(data.githubGistConfigured));
+      setGhAutoSync(
+        data.githubGistAutoSync !== undefined
+          ? Boolean(data.githubGistAutoSync)
+          : Boolean(data.githubGistConfigured)
+      );
       setGhUser(data.githubGistUser ?? '');
       setGistIdInput(data.githubGistId ?? '');
       setGhSyncedAt(data.githubGistSyncedAt ?? '');
@@ -212,6 +218,7 @@ export function SettingsModal({ open, onClose, onSaved }: SettingsModalProps) {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'GitHub トークン検証に失敗しました');
       setGhConfigured(true);
+      setGhAutoSync(Boolean(data.githubGistAutoSync ?? true));
       setGhUser(data.githubGistUser ?? '');
       setGistIdInput(data.githubGistId ?? '');
       if (data.githubGistId) {
@@ -241,6 +248,7 @@ export function SettingsModal({ open, onClose, onSaved }: SettingsModalProps) {
         body: JSON.stringify({ action: 'clear_github' }),
       });
       setGhConfigured(false);
+      setGhAutoSync(false);
       setGhUser('');
       setGistIdInput('');
       setGhSyncedAt('');
@@ -250,6 +258,28 @@ export function SettingsModal({ open, onClose, onSaved }: SettingsModalProps) {
       setError(err instanceof Error ? err.message : '解除に失敗しました');
     } finally {
       setSyncing(false);
+    }
+  }
+
+  async function handleToggleAutoSync(enabled: boolean) {
+    setGhAutoSync(enabled);
+    setError(null);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'set_github_auto_sync', enabled }),
+      });
+      if (res.ok) {
+        setNotice(
+          enabled
+            ? 'Gist への自動保存を ON にしました（変更の約4秒後に自動Push）'
+            : 'Gist への自動保存を OFF にしました（手動Pushのみ）'
+        );
+        onSaved();
+      }
+    } catch {
+      // ignore toggle error
     }
   }
 
@@ -470,6 +500,20 @@ export function SettingsModal({ open, onClose, onSaved }: SettingsModalProps) {
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
               />
             </div>
+
+            {ghConfigured && (
+              <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs text-slate-200 hover:border-sky-500/40">
+                <input
+                  type="checkbox"
+                  checked={ghAutoSync}
+                  onChange={(e) => handleToggleAutoSync(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-slate-600 bg-slate-900 accent-sky-500"
+                />
+                <span>
+                  変更時に自動で Gist へ保存する（MOD・タグ・プリセット変更の約4秒後に自動Push）
+                </span>
+              </label>
+            )}
 
             <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
               <div className="text-[11px] text-slate-500">

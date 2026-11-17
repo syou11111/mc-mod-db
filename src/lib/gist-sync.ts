@@ -6,9 +6,103 @@ import {
   getSetting,
   importDatabaseSnapshot,
   setSetting,
+  subscribeDbMutations,
 } from '@/lib/db';
 
 export const GIST_FILENAME = 'mc-mod-db-backup.json';
+export const GIST_SYNC_EVENT = 'mc-mod-db-sync-status';
+
+export type GistSyncStatus = 'idle' | 'pending' | 'syncing' | 'synced' | 'error';
+
+export interface GistSyncEventDetail {
+  status: GistSyncStatus;
+  syncedAt?: string;
+  error?: string;
+}
+
+const AUTO_SYNC_DEBOUNCE_MS = 4000;
+let autoSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let autoSyncInFlight = false;
+let autoSyncPendingFollowUp = false;
+let autoSyncInstalled = false;
+
+export function emitGistSyncStatus(detail: GistSyncEventDetail): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent<GistSyncEventDetail>(GIST_SYNC_EVENT, { detail }));
+}
+
+export function isGistAutoSyncEnabled(): boolean {
+  return (
+    Boolean(getSetting('github_gist_pat')) &&
+    getSetting('github_gist_auto_sync') !== '0'
+  );
+}
+
+export function setGistAutoSyncEnabled(enabled: boolean): void {
+  setSetting('github_gist_auto_sync', enabled ? '1' : '0');
+  if (!enabled) {
+    if (autoSyncTimer) {
+      clearTimeout(autoSyncTimer);
+      autoSyncTimer = null;
+    }
+    autoSyncPendingFollowUp = false;
+    emitGistSyncStatus({
+      status: 'idle',
+      syncedAt: getSetting('github_gist_synced_at') ?? undefined,
+    });
+  }
+}
+
+async function runAutoPush(): Promise<void> {
+  if (!isGistAutoSyncEnabled()) return;
+  if (autoSyncInFlight) {
+    autoSyncPendingFollowUp = true;
+    return;
+  }
+
+  autoSyncInFlight = true;
+  emitGistSyncStatus({ status: 'syncing' });
+  try {
+    const res = await pushDatabaseToGist();
+    emitGistSyncStatus({ status: 'synced', syncedAt: res.syncedAt });
+  } catch (err) {
+    emitGistSyncStatus({
+      status: 'error',
+      error: err instanceof Error ? err.message : 'Gist 自動保存に失敗しました',
+    });
+  } finally {
+    autoSyncInFlight = false;
+    if (autoSyncPendingFollowUp) {
+      autoSyncPendingFollowUp = false;
+      void runAutoPush();
+    }
+  }
+}
+
+export function installGistAutoSync(): void {
+  if (typeof window === 'undefined' || autoSyncInstalled) return;
+  autoSyncInstalled = true;
+
+  subscribeDbMutations(() => {
+    if (!isGistAutoSyncEnabled()) return;
+    if (autoSyncTimer) {
+      clearTimeout(autoSyncTimer);
+    }
+    emitGistSyncStatus({ status: 'pending' });
+    autoSyncTimer = setTimeout(() => {
+      autoSyncTimer = null;
+      void runAutoPush();
+    }, AUTO_SYNC_DEBOUNCE_MS);
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && autoSyncTimer) {
+      clearTimeout(autoSyncTimer);
+      autoSyncTimer = null;
+      void runAutoPush();
+    }
+  });
+}
 
 function extractGistId(raw?: string): string {
   const trimmed = (raw ?? '').trim();
@@ -94,6 +188,9 @@ export async function verifyAndSaveGitHubToken(
 
   setSetting('github_gist_pat', token);
   setSetting('github_gist_user', user.login);
+  if (getSetting('github_gist_auto_sync') === null) {
+    setSetting('github_gist_auto_sync', '1');
+  }
   if (resolvedGistId) {
     setSetting('github_gist_id', resolvedGistId);
   } else {
@@ -107,10 +204,17 @@ export async function verifyAndSaveGitHubToken(
 }
 
 export function clearGitHubGistSettings(): void {
+  if (autoSyncTimer) {
+    clearTimeout(autoSyncTimer);
+    autoSyncTimer = null;
+  }
+  autoSyncPendingFollowUp = false;
   deleteSetting('github_gist_pat');
   deleteSetting('github_gist_user');
   deleteSetting('github_gist_id');
   deleteSetting('github_gist_synced_at');
+  deleteSetting('github_gist_auto_sync');
+  emitGistSyncStatus({ status: 'idle' });
 }
 
 interface GitHubGistItem {
@@ -199,6 +303,7 @@ export async function pushDatabaseToGist(customGistId?: string): Promise<{
   const syncedAt = new Date().toISOString();
   setSetting('github_gist_id', result.id);
   setSetting('github_gist_synced_at', syncedAt);
+  emitGistSyncStatus({ status: 'synced', syncedAt });
 
   return {
     gistId: result.id,
@@ -257,6 +362,7 @@ export async function pullDatabaseFromGist(customGistId?: string): Promise<{
   const syncedAt = new Date().toISOString();
   setSetting('github_gist_id', gist.id);
   setSetting('github_gist_synced_at', syncedAt);
+  emitGistSyncStatus({ status: 'synced', syncedAt });
 
   return {
     gistId: gist.id,
