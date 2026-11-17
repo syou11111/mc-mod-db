@@ -65,3 +65,12 @@ npm run dev
 ```bash
 npm run build
 ```
+
+---
+
+## クレジット・ライセンス
+
+* **開発**: Hino Shoki
+* **AI 開発協力**: Gemini 4 Hydrogen / Gemini 4 Argon
+* **ライセンス**: [MIT License](./LICENSE)
+
