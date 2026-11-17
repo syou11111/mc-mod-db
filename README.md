@@ -4,7 +4,6 @@ Modrinth と CurseForge に対応した、**完全サーバーレス** の Minec
 GitHub Pages 上で静的アプリとして動作し、データはアクセスしたユーザーごとのブラウザ内（IndexedDB）および自身の非公開 GitHub Gist に保存されます。
 
 * **公開アプリ**: https://syou11111.github.io/mc-mod-db/
-* **リポジトリ**: https://github.com/syou11111/mc-mod-db
 
 ---
 
