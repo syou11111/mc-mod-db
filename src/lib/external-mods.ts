@@ -65,6 +65,7 @@ interface ExternalModPayload {
   updatedAt: string | null;
   categories: string[];
   versions: ExternalVersionInput[];
+  requiredDependencyIds?: string[];
 }
 
 export function getCurseForgeApiKey(): string {
@@ -462,30 +463,36 @@ async function fetchModrinthProjectAndVersions(
     game_versions?: string[];
     loaders?: string[];
     date_published?: string;
-  }
-
-  interface MrMember {
-    role?: string;
-    user?: { username?: string };
+    dependencies?: Array<{
+      project_id?: string | null;
+      dependency_type?: string;
+    }>;
   }
 
   const encoded = encodeURIComponent(idOrSlug);
-  const [project, versions, members] = await Promise.all([
+  const [project, versions] = await Promise.all([
     fetchJson<MrProject>(`https://api.modrinth.com/v2/project/${encoded}`),
     fetchJson<MrVersion[]>(`https://api.modrinth.com/v2/project/${encoded}/version`),
-    fetchJson<MrMember[]>(`https://api.modrinth.com/v2/project/${encoded}/members`).catch(
-      () => [] as MrMember[]
-    ),
   ]);
-
-  const owner =
-    members.find((m) => m.role?.toLowerCase() === 'owner')?.user?.username ??
-    members[0]?.user?.username ??
-    null;
 
   const sortedVersions = [...versions].sort((a, b) =>
     (b.date_published ?? '').localeCompare(a.date_published ?? '')
   );
+
+  const requiredDependencyIds: string[] = [];
+  for (const v of sortedVersions.slice(0, 15)) {
+    for (const dep of v.dependencies ?? []) {
+      if (
+        dep.dependency_type === 'required' &&
+        dep.project_id &&
+        dep.project_id !== project.id &&
+        !requiredDependencyIds.includes(dep.project_id)
+      ) {
+        requiredDependencyIds.push(dep.project_id);
+      }
+    }
+    if (requiredDependencyIds.length >= 6) break;
+  }
 
   const versionMap = new Map<string, ExternalVersionInput>();
   for (const v of sortedVersions) {
@@ -530,7 +537,7 @@ async function fetchModrinthProjectAndVersions(
     slug: project.slug,
     name: project.title,
     summary: project.description ?? '',
-    author: owner,
+    author: null,
     iconUrl: project.icon_url ?? null,
     clientSide: normalizeSide(project.client_side),
     serverSide: normalizeSide(project.server_side),
@@ -538,69 +545,43 @@ async function fetchModrinthProjectAndVersions(
     updatedAt: project.updated ?? null,
     categories,
     versions: Array.from(versionMap.values()),
+    requiredDependencyIds,
   };
 }
 
-async function fetchCurseForgeMod(idOrSlug: string): Promise<ExternalModPayload> {
-  const apiKey = getCurseForgeApiKey();
-  if (!apiKey) {
-    throw new Error(
-      'CurseForge のデータを取得するには APIキーが必要です（右上の「API・設定」から設定してください）'
-    );
-  }
-
-  interface CfMod {
-    id: number;
-    name: string;
-    slug: string;
-    summary?: string;
-    downloadCount?: number;
-    dateModified?: string;
-    logo?: { thumbnailUrl?: string; url?: string } | null;
-    authors?: Array<{ name: string }>;
-    categories?: Array<{ name: string }>;
-    latestFilesIndexes?: Array<{
-      gameVersion?: string;
-      filename?: string;
-      releaseType?: number;
-      modLoader?: number;
-    }>;
-  }
-
-  interface CfFile {
+interface CfModData {
+  id: number;
+  name: string;
+  slug: string;
+  summary?: string;
+  downloadCount?: number;
+  dateModified?: string;
+  logo?: { thumbnailUrl?: string; url?: string } | null;
+  authors?: Array<{ name: string }>;
+  categories?: Array<{ name: string }>;
+  latestFiles?: Array<{
     displayName?: string;
     fileName?: string;
     fileDate?: string;
     releaseType?: number;
     gameVersions?: string[];
-  }
+    dependencies?: Array<{
+      modId?: number;
+      relationType?: number;
+    }>;
+  }>;
+  latestFilesIndexes?: Array<{
+    gameVersion?: string;
+    filename?: string;
+    releaseType?: number;
+    modLoader?: number;
+  }>;
+}
 
-  let mod: CfMod | undefined;
-  if (/^\d+$/.test(idOrSlug.trim())) {
-    const res = await fetchJson<{ data: CfMod }>(
-      `https://api.curseforge.com/v1/mods/${idOrSlug.trim()}`,
-      { 'x-api-key': apiKey }
-    );
-    mod = res.data;
-  } else {
-    const qs = new URLSearchParams({
-      gameId: '432',
-      classId: '6',
-      slug: idOrSlug.trim().toLowerCase(),
-    });
-    const res = await fetchJson<{ data?: CfMod[] }>(
-      `https://api.curseforge.com/v1/mods/search?${qs.toString()}`,
-      { 'x-api-key': apiKey }
-    );
-    mod =
-      res.data?.find((m) => m.slug.toLowerCase() === idOrSlug.trim().toLowerCase()) ??
-      res.data?.[0];
-  }
-
-  if (!mod) {
-    throw new Error(`CurseForge で MOD (${idOrSlug}) が見つかりませんでした`);
-  }
-
+function buildCurseForgePayloadFromModData(
+  mod: CfModData,
+  extraFiles?: CfModData['latestFiles']
+): ExternalModPayload {
   const releaseMap: Record<number, string> = {
     1: 'release',
     2: 'beta',
@@ -627,35 +608,39 @@ async function fetchCurseForgeMod(idOrSlug: string): Promise<ExternalModPayload>
     }
   }
 
-  try {
-    const filesRes = await fetchJson<{ data?: CfFile[] }>(
-      `https://api.curseforge.com/v1/mods/${mod.id}/files?pageSize=50`,
-      { 'x-api-key': apiKey }
-    );
-    for (const file of filesRes.data ?? []) {
-      const gvs = file.gameVersions ?? [];
-      const loaders = gvs
-        .map((v) => v.toLowerCase())
-        .filter((v) => VALID_LOADERS.has(v));
-      const mcVers = gvs.filter((v) => /^\d+\.\d+/.test(v));
-      const releaseType = releaseMap[file.releaseType ?? 1] ?? 'release';
-      for (const mcVersion of mcVers) {
-        for (const loader of loaders) {
-          const key = `${mcVersion}::${loader}`;
-          if (!versionMap.has(key)) {
-            versionMap.set(key, {
-              mcVersion,
-              loader,
-              versionNumber: file.displayName ?? file.fileName ?? 'file',
-              releaseType,
-              publishedAt: file.fileDate ?? mod.dateModified ?? null,
-            });
-          }
+  const allFiles = [...(extraFiles ?? []), ...(mod.latestFiles ?? [])];
+  const requiredDependencyIds: string[] = [];
+  const selfIdStr = String(mod.id);
+
+  for (const file of allFiles) {
+    for (const dep of file.dependencies ?? []) {
+      if (dep.relationType === 3 && dep.modId) {
+        const depIdStr = String(dep.modId);
+        if (depIdStr !== selfIdStr && !requiredDependencyIds.includes(depIdStr)) {
+          requiredDependencyIds.push(depIdStr);
         }
       }
     }
-  } catch {
-    // latestFilesIndexes だけで継続可能
+    const gvs = file.gameVersions ?? [];
+    const loaders = gvs
+      .map((v) => v.toLowerCase())
+      .filter((v) => VALID_LOADERS.has(v));
+    const mcVers = gvs.filter((v) => /^\d+\.\d+/.test(v));
+    const releaseType = releaseMap[file.releaseType ?? 1] ?? 'release';
+    for (const mcVersion of mcVers) {
+      for (const loader of loaders) {
+        const key = `${mcVersion}::${loader}`;
+        if (!versionMap.has(key)) {
+          versionMap.set(key, {
+            mcVersion,
+            loader,
+            versionNumber: file.displayName ?? file.fileName ?? 'file',
+            releaseType,
+            publishedAt: file.fileDate ?? mod.dateModified ?? null,
+          });
+        }
+      }
+    }
   }
 
   const categories = Array.from(
@@ -664,7 +649,7 @@ async function fetchCurseForgeMod(idOrSlug: string): Promise<ExternalModPayload>
 
   return {
     source: 'curseforge',
-    externalId: String(mod.id),
+    externalId: selfIdStr,
     slug: mod.slug,
     name: mod.name,
     summary: mod.summary ?? '',
@@ -676,7 +661,63 @@ async function fetchCurseForgeMod(idOrSlug: string): Promise<ExternalModPayload>
     updatedAt: mod.dateModified ?? null,
     categories,
     versions: Array.from(versionMap.values()),
+    requiredDependencyIds: requiredDependencyIds.slice(0, 6),
   };
+}
+
+async function fetchCurseForgeMod(
+  idOrSlug: string,
+  options?: { lightweight?: boolean }
+): Promise<ExternalModPayload> {
+  const apiKey = getCurseForgeApiKey();
+  if (!apiKey) {
+    throw new Error(
+      'CurseForge のデータを取得するには APIキーが必要です（右上の「API・設定」から設定してください）'
+    );
+  }
+
+  let mod: CfModData | undefined;
+  if (/^\d+$/.test(idOrSlug.trim())) {
+    const res = await fetchJson<{ data: CfModData }>(
+      `https://api.curseforge.com/v1/mods/${idOrSlug.trim()}`,
+      { 'x-api-key': apiKey }
+    );
+    mod = res.data;
+  } else {
+    const qs = new URLSearchParams({
+      gameId: '432',
+      classId: '6',
+      slug: idOrSlug.trim().toLowerCase(),
+    });
+    const res = await fetchJson<{ data?: CfModData[] }>(
+      `https://api.curseforge.com/v1/mods/search?${qs.toString()}`,
+      { 'x-api-key': apiKey }
+    );
+    mod =
+      res.data?.find((m) => m.slug.toLowerCase() === idOrSlug.trim().toLowerCase()) ??
+      res.data?.[0];
+  }
+
+  if (!mod) {
+    throw new Error(`CurseForge で MOD (${idOrSlug}) が見つかりませんでした`);
+  }
+
+  // latestFilesIndexes + latestFiles が既に含まれている場合は追加の /files API 呼び出しを省略して高速化
+  let extraFiles: CfModData['latestFiles'];
+  const hasIndexes = (mod.latestFilesIndexes?.length ?? 0) > 0;
+  if (!options?.lightweight && !hasIndexes) {
+    try {
+      const filesRes = await fetchJson<{ data?: CfModData['latestFiles'] }>(
+        `https://api.curseforge.com/v1/mods/${mod.id}/files?pageSize=30`,
+        { 'x-api-key': apiKey }
+      );
+      extraFiles = filesRes.data;
+    } catch {
+      // latestFiles だけで継続可能
+    }
+  }
+
+  return buildCurseForgePayloadFromModData(mod, extraFiles);
 }
 
 function upsertExternalPayload(
@@ -734,15 +775,8 @@ async function tryMatchAndMergeCounterpart(
     const apiKey = getCurseForgeApiKey();
     if (!apiKey) return null;
 
-    interface CfSearchMod {
-      id: number;
-      name: string;
-      slug: string;
-      authors?: Array<{ name: string }>;
-    }
-
     const slugCandidate = (mod.modrinthSlug ?? mod.slug).trim().toLowerCase();
-    let matchedCfId: string | null = null;
+    let matchedCfMod: CfModData | undefined;
 
     if (slugCandidate) {
       const slugQs = new URLSearchParams({
@@ -750,31 +784,28 @@ async function tryMatchAndMergeCounterpart(
         classId: '6',
         slug: slugCandidate,
       });
-      const slugRes = await fetchJson<{ data?: CfSearchMod[] }>(
+      const slugRes = await fetchJson<{ data?: CfModData[] }>(
         `https://api.curseforge.com/v1/mods/search?${slugQs.toString()}`,
         { 'x-api-key': apiKey }
       );
-      const exactSlug = (slugRes.data ?? []).find(
+      matchedCfMod = (slugRes.data ?? []).find(
         (m) => m.slug.toLowerCase() === slugCandidate
       );
-      if (exactSlug) {
-        matchedCfId = String(exactSlug.id);
-      }
     }
 
-    if (!matchedCfId) {
+    if (!matchedCfMod) {
       const nameQs = new URLSearchParams({
         gameId: '432',
         classId: '6',
         searchFilter: mod.name,
         pageSize: '15',
       });
-      const nameRes = await fetchJson<{ data?: CfSearchMod[] }>(
+      const nameRes = await fetchJson<{ data?: CfModData[] }>(
         `https://api.curseforge.com/v1/mods/search?${nameQs.toString()}`,
         { 'x-api-key': apiKey }
       );
       const candidates = nameRes.data ?? [];
-      const exactName =
+      matchedCfMod =
         candidates.find((m) => {
           if (m.slug.toLowerCase() === slugCandidate) return true;
           const authorMatch =
@@ -783,18 +814,16 @@ async function tryMatchAndMergeCounterpart(
           return isModNameCompatible(m.name, mod.name) && authorMatch;
         }) ??
         candidates.find((m) => isModNameCompatible(m.name, mod.name));
-
-      if (exactName) {
-        matchedCfId = String(exactName.id);
-      }
     }
 
-    if (matchedCfId) {
+    if (matchedCfMod) {
+      const matchedCfId = String(matchedCfMod.id);
       const existingOwner = maps.byCurseforgeId.get(matchedCfId);
       if (existingOwner && existingOwner !== mod.id) {
         return null;
       }
-      const cfPayload = await fetchCurseForgeMod(matchedCfId);
+      // 検索結果に既に latestFilesIndexes と latestFiles が含まれているため、再取得せずそのままペイロード構築
+      const cfPayload = buildCurseForgePayloadFromModData(matchedCfMod);
       upsertExternalPayload(cfPayload, { mergeIntoModId: mod.id });
       return 'curseforge';
     }
@@ -890,6 +919,7 @@ export async function importModFromExternal(params: {
   action: 'created' | 'updated' | 'merged';
   linkedDependencies: LinkedDependencyInfo[];
   matchedCounterpart: ModSource | null;
+  requiredDependencyIds?: string[];
 }> {
   const parsed = params.input
     ? parseModInput(params.input, params.source)
@@ -931,6 +961,12 @@ export async function importModFromExternal(params: {
     try {
       const depRes = await fetchAndLinkDependenciesForMod(result.mod.id, {
         maxDepth: 2,
+        preFetchedDependencies: payload.requiredDependencyIds
+          ? {
+              source: parsed.source,
+              ids: payload.requiredDependencyIds,
+            }
+          : undefined,
       });
       finalMod = depRes.mod;
       linkedDependencies = depRes.linkedMods;
@@ -944,6 +980,7 @@ export async function importModFromExternal(params: {
     action: result.action,
     linkedDependencies,
     matchedCounterpart,
+    requiredDependencyIds: payload.requiredDependencyIds,
   };
 }
 
@@ -953,14 +990,23 @@ export async function syncModById(modId: string): Promise<ModRecord> {
     throw new Error('対象のMODがDBに存在しません');
   }
 
-  if (current.modrinthId) {
-    const payload = await fetchModrinthProjectAndVersions(current.modrinthId);
-    upsertExternalPayload(payload, { mergeIntoModId: modId });
-  }
+  const cfKey = getCurseForgeApiKey();
 
-  if (current.curseforgeId && getCurseForgeApiKey()) {
-    const payload = await fetchCurseForgeMod(current.curseforgeId);
-    upsertExternalPayload(payload, { mergeIntoModId: modId });
+  // Modrinth と CurseForge の取得を並列実行して待ち時間を半減
+  const [mrPayload, cfPayload] = await Promise.all([
+    current.modrinthId
+      ? fetchModrinthProjectAndVersions(current.modrinthId)
+      : Promise.resolve(null),
+    current.curseforgeId && cfKey
+      ? fetchCurseForgeMod(current.curseforgeId, { lightweight: true })
+      : Promise.resolve(null),
+  ]);
+
+  if (mrPayload) {
+    upsertExternalPayload(mrPayload, { mergeIntoModId: modId });
+  }
+  if (cfPayload) {
+    upsertExternalPayload(cfPayload, { mergeIntoModId: modId });
   }
 
   const afterPrimarySync = getModById(modId);
@@ -987,7 +1033,11 @@ const MAX_LINKED_DEPENDENCIES = 8;
  */
 export async function fetchAndLinkDependenciesForMod(
   modId: string,
-  options?: { maxDepth?: number; visitedModIds?: Set<string> }
+  options?: {
+    maxDepth?: number;
+    visitedModIds?: Set<string>;
+    preFetchedDependencies?: { source: ModSource; ids: string[] };
+  }
 ): Promise<{
   mod: ModRecord;
   linkedMods: LinkedDependencyInfo[];
@@ -1021,17 +1071,21 @@ export async function fetchAndLinkDependenciesForMod(
       let newlyImported = false;
       let wasAlreadyInDb = Boolean(depLocalId);
       let depName = '';
+      let subRequiredIds: string[] | undefined;
 
       if (!depLocalId) {
         const res = await importModFromExternal({
           source,
           idOrSlug: externalId,
           autoLinkDependencies: false,
+          // 前提MODの自動取得時は対向プラットフォーム検索をスキップして高速化
+          autoMatchCounterpart: false,
         });
         depLocalId = res.mod.id;
         depName = res.mod.name;
         newlyImported = res.action === 'created';
         wasAlreadyInDb = !newlyImported;
+        subRequiredIds = res.requiredDependencyIds;
 
         if (newlyImported) {
           const prereqTag = createOrGetTag('前提MOD', 'custom', '#64748b');
@@ -1060,6 +1114,9 @@ export async function fetchAndLinkDependenciesForMod(
             const subRes = await fetchAndLinkDependenciesForMod(depLocalId, {
               maxDepth: maxDepth - 1,
               visitedModIds,
+              preFetchedDependencies: subRequiredIds
+                ? { source, ids: subRequiredIds }
+                : undefined,
             });
             for (const sub of subRes.linkedMods) {
               if (linkedMods.length >= MAX_LINKED_DEPENDENCIES) break;
@@ -1078,87 +1135,95 @@ export async function fetchAndLinkDependenciesForMod(
     }
   }
 
-  if (current.modrinthId) {
-    interface MrVerDep {
-      date_published?: string;
-      dependencies?: Array<{
-        project_id?: string | null;
-        dependency_type?: string;
-      }>;
-    }
+  const preFetched = options?.preFetchedDependencies;
 
-    const encoded = encodeURIComponent(current.modrinthId);
-    const versions = await fetchJson<MrVerDep[]>(
-      `https://api.modrinth.com/v2/project/${encoded}/version`
+  if (preFetched && preFetched.ids.length > 0) {
+    const note =
+      preFetched.source === 'modrinth'
+        ? 'API自動検出 (Modrinth)'
+        : 'API自動検出 (CurseForge)';
+    await Promise.all(
+      preFetched.ids.slice(0, 6).map((depId) =>
+        processSingleDependency(preFetched.source, depId, note)
+      )
     );
-
-    const sorted = [...versions].sort((a, b) =>
-      (b.date_published ?? '').localeCompare(a.date_published ?? '')
-    );
-
-    const depProjectIds: string[] = [];
-    for (const v of sorted.slice(0, 15)) {
-      for (const dep of v.dependencies ?? []) {
-        if (
-          dep.dependency_type === 'required' &&
-          dep.project_id &&
-          dep.project_id !== current.modrinthId &&
-          !depProjectIds.includes(dep.project_id)
-        ) {
-          depProjectIds.push(dep.project_id);
-        }
+  } else {
+    if (current.modrinthId) {
+      interface MrVerDep {
+        date_published?: string;
+        dependencies?: Array<{
+          project_id?: string | null;
+          dependency_type?: string;
+        }>;
       }
-      if (depProjectIds.length >= 6) break;
-    }
 
-    for (const depProjectId of depProjectIds.slice(0, 6)) {
-      if (linkedMods.length >= MAX_LINKED_DEPENDENCIES) break;
-      await processSingleDependency(
-        'modrinth',
-        depProjectId,
-        'API自動検出 (Modrinth)'
-      );
-    }
-  }
-
-  const apiKey = getCurseForgeApiKey();
-  if (current.curseforgeId && apiKey) {
-    interface CfFileDep {
-      dependencies?: Array<{
-        modId?: number;
-        relationType?: number;
-      }>;
-    }
-
-    try {
-      const filesRes = await fetchJson<{ data?: CfFileDep[] }>(
-        `https://api.curseforge.com/v1/mods/${current.curseforgeId}/files?pageSize=10`,
-        { 'x-api-key': apiKey }
+      const encoded = encodeURIComponent(current.modrinthId);
+      const versions = await fetchJson<MrVerDep[]>(
+        `https://api.modrinth.com/v2/project/${encoded}/version`
       );
 
-      const cfDepIds: string[] = [];
-      for (const file of filesRes.data ?? []) {
-        for (const dep of file.dependencies ?? []) {
-          if (dep.relationType === 3 && dep.modId) {
-            const idStr = String(dep.modId);
-            if (idStr !== current.curseforgeId && !cfDepIds.includes(idStr)) {
-              cfDepIds.push(idStr);
-            }
+      const sorted = [...versions].sort((a, b) =>
+        (b.date_published ?? '').localeCompare(a.date_published ?? '')
+      );
+
+      const depProjectIds: string[] = [];
+      for (const v of sorted.slice(0, 15)) {
+        for (const dep of v.dependencies ?? []) {
+          if (
+            dep.dependency_type === 'required' &&
+            dep.project_id &&
+            dep.project_id !== current.modrinthId &&
+            !depProjectIds.includes(dep.project_id)
+          ) {
+            depProjectIds.push(dep.project_id);
           }
         }
-        if (cfDepIds.length >= 6) break;
+        if (depProjectIds.length >= 6) break;
       }
 
-      for (const cfDepId of cfDepIds.slice(0, 6)) {
-        if (linkedMods.length >= MAX_LINKED_DEPENDENCIES) break;
-        await processSingleDependency(
-          'curseforge',
-          cfDepId,
-          'API自動検出 (CurseForge)'
-        );
+      await Promise.all(
+        depProjectIds.slice(0, 6).map((depProjectId) =>
+          processSingleDependency('modrinth', depProjectId, 'API自動検出 (Modrinth)')
+        )
+      );
+    }
+
+    const apiKey = getCurseForgeApiKey();
+    if (current.curseforgeId && apiKey && linkedMods.length === 0) {
+      interface CfFileDep {
+        dependencies?: Array<{
+          modId?: number;
+          relationType?: number;
+        }>;
       }
-    } catch {
-      // Modrinth側で解決できていればエラーにせず継続
+
+      try {
+        const filesRes = await fetchJson<{ data?: CfFileDep[] }>(
+          `https://api.curseforge.com/v1/mods/${current.curseforgeId}/files?pageSize=10`,
+          { 'x-api-key': apiKey }
+        );
+
+        const cfDepIds: string[] = [];
+        for (const file of filesRes.data ?? []) {
+          for (const dep of file.dependencies ?? []) {
+            if (dep.relationType === 3 && dep.modId) {
+              const idStr = String(dep.modId);
+              if (idStr !== current.curseforgeId && !cfDepIds.includes(idStr)) {
+                cfDepIds.push(idStr);
+              }
+            }
+          }
+          if (cfDepIds.length >= 6) break;
+        }
+
+        await Promise.all(
+          cfDepIds.slice(0, 6).map((cfDepId) =>
+            processSingleDependency('curseforge', cfDepId, 'API自動検出 (CurseForge)')
+          )
+        );
+      } catch {
+        // Modrinth側で解決できていればエラーにせず継続
+      }
     }
   }
 
@@ -1169,3 +1234,4 @@ export async function fetchAndLinkDependenciesForMod(
 
   return { mod: updated, linkedMods };
 }
+

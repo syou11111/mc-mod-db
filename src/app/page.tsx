@@ -590,9 +590,13 @@ export default function HomePage() {
     serverFilter !== 'all';
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#0b0f17]">
+    <div
+      className={`min-h-screen flex flex-col bg-[#0b0f17] ${
+        activeTab === 'library' ? 'lg:h-screen lg:overflow-hidden' : ''
+      }`}
+    >
       {/* Header */}
-      <header className="sticky top-0 z-30 border-b border-slate-800/90 bg-[#0b0f17]/95 backdrop-blur">
+      <header className="sticky top-0 z-30 shrink-0 border-b border-slate-800/90 bg-[#0b0f17]/95 backdrop-blur">
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-3 px-4 py-3">
           <div className="flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-2.5">
@@ -763,7 +767,13 @@ export default function HomePage() {
       </header>
 
       {/* Main Content */}
-      <main className="mx-auto w-full max-w-[1600px] flex-1 px-4 py-5">
+      <main
+        className={`mx-auto w-full max-w-[1600px] flex-1 px-4 py-5 ${
+          activeTab === 'library'
+            ? 'lg:flex lg:min-h-0 lg:flex-col lg:overflow-hidden lg:py-4'
+            : ''
+        }`}
+      >
         {activeTab === 'discover' ? (
           <DiscoverPanel
             allTags={allTags}
@@ -773,9 +783,9 @@ export default function HomePage() {
         ) : activeTab === 'presets' ? (
           <PresetsPanel onOpenModDetail={(id) => setDetailModId(id)} />
         ) : (
-          <div className="flex flex-col gap-5 lg:flex-row">
+          <div className="flex flex-col gap-5 lg:min-h-0 lg:flex-1 lg:flex-row">
             {/* Sidebar Filters */}
-            <aside className="w-full shrink-0 space-y-4 lg:w-72 xl:w-80">
+            <aside className="w-full shrink-0 space-y-4 lg:h-full lg:w-72 lg:overflow-y-auto lg:pr-1 xl:w-80">
               <div className="rounded-xl border border-slate-800 bg-[#111827] p-4 space-y-4">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-1.5 text-sm font-bold text-white">
@@ -1208,217 +1218,220 @@ export default function HomePage() {
             </aside>
 
             {/* Right Main Search Results */}
-            <section className="flex-1 min-w-0 space-y-4">
-              {/* Top Search & Sort Bar */}
-              <div className="flex flex-wrap items-center gap-2.5 rounded-xl border border-slate-800 bg-[#111827] p-3">
-                <div className="relative flex-1 min-w-[220px]">
-                  <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
-                  <input
-                    type="text"
-                    value={q}
-                    onChange={(e) => setQ(e.target.value)}
-                    placeholder="MOD名、日本語通称、メモ、Slugで検索..."
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950 py-2 pl-9 pr-3 text-sm text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
-                  />
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs text-slate-400">
-                    <strong className="text-white">{mods.length}</strong> / {totalCount} 件
-                  </span>
-
-                  {mods.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={toggleSelectAllVisible}
-                      className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-2 text-xs text-slate-300 hover:border-slate-500 hover:text-white"
-                      title="表示中のMODをすべて選択 / 解除"
-                    >
-                      {mods.every((m) => selectedModIds.has(m.id)) ? (
-                        <CheckSquare className="h-3.5 w-3.5 text-emerald-400" />
-                      ) : (
-                        <Square className="h-3.5 w-3.5" />
-                      )}
-                      {mods.every((m) => selectedModIds.has(m.id)) ? '全解除' : '全選択'}
-                    </button>
-                  )}
-
-                  {totalCount > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => handleBulkAction('sync', 'all')}
-                      disabled={bulkBusy}
-                      className="inline-flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2.5 py-2 text-xs font-medium text-sky-200 hover:bg-sky-500/20 disabled:opacity-50"
-                      title="DB内の全MODを最新化し、Modrinth/CurseForge未連携分も自動で紐付けます"
-                    >
-                      {bulkBusy ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <RefreshCw className="h-3.5 w-3.5" />
-                      )}
-                      全件同期
-                    </button>
-                  )}
-
-                  <select
-                    value={sort}
-                    onChange={(e) => setSort(e.target.value as ModSort)}
-                    className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 focus:border-emerald-500 focus:outline-none"
-                  >
-                    <option value="updated_desc">MOD更新日順</option>
-                    <option value="downloads_desc">DL数順</option>
-                    <option value="name_asc">名前順 (A-Z)</option>
-                    <option value="created_desc">DB登録が新しい順</option>
-                  </select>
-
-                  <div className="flex rounded-lg border border-slate-700 bg-slate-950 p-0.5">
-                    <button
-                      type="button"
-                      onClick={() => setViewMode('card')}
-                      className={`rounded-md p-1.5 ${
-                        viewMode === 'card'
-                          ? 'bg-slate-800 text-white'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                      title="カード表示"
-                    >
-                      <LayoutGrid className="h-4 w-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setViewMode('table')}
-                      className={`rounded-md p-1.5 ${
-                        viewMode === 'table'
-                          ? 'bg-slate-800 text-white'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                      title="テーブル表示"
-                    >
-                      <List className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Bulk Action Bar & Notice */}
-              {selectedModIds.size > 0 && (
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/40 bg-emerald-950/30 px-3.5 py-2.5 text-xs">
-                  <div className="flex items-center gap-2">
-                    <span className="font-bold text-emerald-300">
-                      {selectedModIds.size} 件選択中
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedModIds(new Set())}
-                      className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-slate-300 hover:text-white"
-                    >
-                      選択解除
-                    </button>
+            <section className="flex flex-1 min-w-0 flex-col gap-3 lg:h-full lg:min-h-0 lg:overflow-hidden">
+              {/* Top Search & Sort Bar (Fixed / Sticky) */}
+              <div className="sticky top-[61px] z-20 shrink-0 space-y-2.5 lg:static">
+                <div className="flex flex-wrap items-center gap-2.5 rounded-xl border border-slate-800 bg-[#111827]/95 p-3 shadow-md backdrop-blur">
+                  <div className="relative flex-1 min-w-[220px]">
+                    <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
+                    <input
+                      type="text"
+                      value={q}
+                      onChange={(e) => setQ(e.target.value)}
+                      placeholder="MOD名、日本語通称、メモ、Slugで検索..."
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 py-2 pl-9 pr-3 text-sm text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
+                    />
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleBulkAction('sync')}
-                      disabled={bulkBusy}
-                      className="inline-flex items-center gap-1 rounded-lg bg-sky-600 px-2.5 py-1.5 font-semibold text-white hover:bg-sky-500 disabled:opacity-50"
-                    >
-                      {bulkBusy ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <RefreshCw className="h-3.5 w-3.5" />
-                      )}
-                      一括同期
-                    </button>
+                    <span className="text-xs text-slate-400">
+                      <strong className="text-white">{mods.length}</strong> / {totalCount} 件
+                    </span>
 
-                    <div className="flex items-center gap-1">
-                      <select
-                        value={bulkTargetStatus}
-                        onChange={(e) =>
-                          setBulkTargetStatus(e.target.value as ModStatus)
-                        }
-                        className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-200"
-                      >
-                        <option value="adopted">採用</option>
-                        <option value="candidate">候補</option>
-                        <option value="deprecated">非推奨</option>
-                      </select>
+                    {mods.length > 0 && (
                       <button
                         type="button"
-                        onClick={() => handleBulkAction('status')}
+                        onClick={toggleSelectAllVisible}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-2 text-xs text-slate-300 hover:border-slate-500 hover:text-white"
+                        title="表示中のMODをすべて選択 / 解除"
+                      >
+                        {mods.every((m) => selectedModIds.has(m.id)) ? (
+                          <CheckSquare className="h-3.5 w-3.5 text-emerald-400" />
+                        ) : (
+                          <Square className="h-3.5 w-3.5" />
+                        )}
+                        {mods.every((m) => selectedModIds.has(m.id)) ? '全解除' : '全選択'}
+                      </button>
+                    )}
+
+                    {totalCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => handleBulkAction('sync', 'all')}
                         disabled={bulkBusy}
-                        className="rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50"
+                        className="inline-flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2.5 py-2 text-xs font-medium text-sky-200 hover:bg-sky-500/20 disabled:opacity-50"
+                        title="DB内の全MODを最新化し、Modrinth/CurseForge未連携分も自動で紐付けます"
                       >
-                        状態変更
+                        {bulkBusy ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        )}
+                        全件同期
                       </button>
-                    </div>
+                    )}
 
-                    <div className="flex items-center gap-1">
-                      <select
-                        value={bulkTargetTagId}
-                        onChange={(e) => setBulkTargetTagId(e.target.value)}
-                        className="max-w-[140px] rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-200"
-                      >
-                        <option value="">タグを選択...</option>
-                        {allTags
-                          .filter((t) => t.kind === 'custom')
-                          .map((t) => (
-                            <option key={t.id} value={t.id}>
-                              {t.name}
-                            </option>
-                          ))}
-                      </select>
-                      <button
-                        type="button"
-                        onClick={() => handleBulkAction('addTag')}
-                        disabled={bulkBusy || !bulkTargetTagId}
-                        className="rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2 py-1.5 font-medium text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-50"
-                      >
-                        +付与
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleBulkAction('removeTag')}
-                        disabled={bulkBusy || !bulkTargetTagId}
-                        className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1.5 font-medium text-slate-300 hover:bg-slate-700 disabled:opacity-50"
-                      >
-                        -解除
-                      </button>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => handleBulkAction('delete')}
-                      disabled={bulkBusy}
-                      className="inline-flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1.5 font-medium text-rose-200 hover:bg-rose-500/25 disabled:opacity-50"
+                    <select
+                      value={sort}
+                      onChange={(e) => setSort(e.target.value as ModSort)}
+                      className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 focus:border-emerald-500 focus:outline-none"
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      一括削除
-                    </button>
+                      <option value="updated_desc">MOD更新日順</option>
+                      <option value="downloads_desc">DL数順</option>
+                      <option value="name_asc">名前順 (A-Z)</option>
+                      <option value="created_desc">DB登録が新しい順</option>
+                    </select>
+
+                    <div className="flex rounded-lg border border-slate-700 bg-slate-950 p-0.5">
+                      <button
+                        type="button"
+                        onClick={() => setViewMode('card')}
+                        className={`rounded-md p-1.5 ${
+                          viewMode === 'card'
+                            ? 'bg-slate-800 text-white'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                        title="カード表示"
+                      >
+                        <LayoutGrid className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setViewMode('table')}
+                        className={`rounded-md p-1.5 ${
+                          viewMode === 'table'
+                            ? 'bg-slate-800 text-white'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                        title="テーブル表示"
+                      >
+                        <List className="h-4 w-4" />
+                      </button>
+                    </div>
                   </div>
                 </div>
-              )}
 
-              {bulkNotice && (
-                <div
-                  className={`flex items-center justify-between rounded-xl border px-3.5 py-2 text-xs ${
-                    bulkNotice.type === 'ok'
-                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
-                      : 'border-rose-500/40 bg-rose-500/10 text-rose-200'
-                  }`}
-                >
-                  <span>{bulkNotice.text}</span>
-                  <button
-                    type="button"
-                    onClick={() => setBulkNotice(null)}
-                    className="ml-2 text-slate-400 hover:text-white"
+                {/* Bulk Action Bar & Notice */}
+                {selectedModIds.size > 0 && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/40 bg-emerald-950/30 px-3.5 py-2.5 text-xs backdrop-blur">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-emerald-300">
+                        {selectedModIds.size} 件選択中
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedModIds(new Set())}
+                        className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-slate-300 hover:text-white"
+                      >
+                        選択解除
+                      </button>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleBulkAction('sync')}
+                        disabled={bulkBusy}
+                        className="inline-flex items-center gap-1 rounded-lg bg-sky-600 px-2.5 py-1.5 font-semibold text-white hover:bg-sky-500 disabled:opacity-50"
+                      >
+                        {bulkBusy ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        )}
+                        一括同期
+                      </button>
+
+                      <div className="flex items-center gap-1">
+                        <select
+                          value={bulkTargetStatus}
+                          onChange={(e) =>
+                            setBulkTargetStatus(e.target.value as ModStatus)
+                          }
+                          className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-200"
+                        >
+                          <option value="adopted">採用</option>
+                          <option value="candidate">候補</option>
+                          <option value="deprecated">非推奨</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => handleBulkAction('status')}
+                          disabled={bulkBusy}
+                          className="rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50"
+                        >
+                          状態変更
+                        </button>
+                      </div>
+
+                      <div className="flex items-center gap-1">
+                        <select
+                          value={bulkTargetTagId}
+                          onChange={(e) => setBulkTargetTagId(e.target.value)}
+                          className="max-w-[140px] rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-200"
+                        >
+                          <option value="">タグを選択...</option>
+                          {allTags
+                            .filter((t) => t.kind === 'custom')
+                            .map((t) => (
+                              <option key={t.id} value={t.id}>
+                                {t.name}
+                              </option>
+                            ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => handleBulkAction('addTag')}
+                          disabled={bulkBusy || !bulkTargetTagId}
+                          className="rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2 py-1.5 font-medium text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-50"
+                        >
+                          +付与
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleBulkAction('removeTag')}
+                          disabled={bulkBusy || !bulkTargetTagId}
+                          className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1.5 font-medium text-slate-300 hover:bg-slate-700 disabled:opacity-50"
+                        >
+                          -解除
+                        </button>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleBulkAction('delete')}
+                        disabled={bulkBusy}
+                        className="inline-flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1.5 font-medium text-rose-200 hover:bg-rose-500/25 disabled:opacity-50"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        一括削除
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {bulkNotice && (
+                  <div
+                    className={`flex items-center justify-between rounded-xl border px-3.5 py-2 text-xs ${
+                      bulkNotice.type === 'ok'
+                        ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+                        : 'border-rose-500/40 bg-rose-500/10 text-rose-200'
+                    }`}
                   >
-                    ×
-                  </button>
-                </div>
-              )}
+                    <span>{bulkNotice.text}</span>
+                    <button
+                      type="button"
+                      onClick={() => setBulkNotice(null)}
+                      className="ml-2 text-slate-400 hover:text-white"
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
+              </div>
 
-              {/* Results Area */}
+              {/* Scrollable Results Area */}
+              <div className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-1">
               {loadingMods && mods.length === 0 ? (
                 <div className="flex items-center justify-center py-20 text-slate-400">
                   <Loader2 className="mr-2 h-6 w-6 animate-spin text-emerald-400" />
@@ -1678,7 +1691,7 @@ export default function HomePage() {
                 /* Table View */
                 <div className="overflow-x-auto rounded-xl border border-slate-800 bg-[#111827]">
                   <table className="w-full text-left text-xs">
-                    <thead className="border-b border-slate-800 bg-slate-950/70 text-slate-400">
+                    <thead className="sticky top-0 z-10 border-b border-slate-800 bg-slate-950/95 text-slate-400 backdrop-blur">
                       <tr>
                         <th className="w-10 px-3 py-3">
                           <button
@@ -1804,6 +1817,7 @@ export default function HomePage() {
                   </table>
                 </div>
               )}
+              </div>
             </section>
           </div>
         )}

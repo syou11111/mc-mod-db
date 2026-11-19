@@ -160,29 +160,35 @@ export async function handleApiRequest(
           const linkedMap = new Map<string, LinkedDependencyInfo>();
           const errors: Array<{ target: string; error: string }> = [];
 
-          for (const item of body.items) {
-            try {
-              const res = await importModFromExternal({
-                source: item.source,
-                idOrSlug: item.idOrSlug,
-                initialTagIds: body.tagIds,
-                autoLinkDependencies: autoDep,
-              });
-              imported.push({ mod: res.mod, action: res.action });
-              for (const dep of res.linkedDependencies) {
-                const prev = linkedMap.get(dep.id);
-                linkedMap.set(dep.id, {
-                  id: dep.id,
-                  name: dep.name,
-                  newlyImported: Boolean(prev?.newlyImported || dep.newlyImported),
-                });
-              }
-            } catch (err) {
-              errors.push({
-                target: `${item.source}:${item.idOrSlug}`,
-                error: err instanceof Error ? err.message : '登録に失敗しました',
-              });
-            }
+          const concurrency = 4;
+          for (let i = 0; i < body.items.length; i += concurrency) {
+            const chunk = body.items.slice(i, i + concurrency);
+            await Promise.all(
+              chunk.map(async (item) => {
+                try {
+                  const res = await importModFromExternal({
+                    source: item.source,
+                    idOrSlug: item.idOrSlug,
+                    initialTagIds: body.tagIds,
+                    autoLinkDependencies: autoDep,
+                  });
+                  imported.push({ mod: res.mod, action: res.action });
+                  for (const dep of res.linkedDependencies) {
+                    const prev = linkedMap.get(dep.id);
+                    linkedMap.set(dep.id, {
+                      id: dep.id,
+                      name: dep.name,
+                      newlyImported: Boolean(prev?.newlyImported || dep.newlyImported),
+                    });
+                  }
+                } catch (err) {
+                  errors.push({
+                    target: `${item.source}:${item.idOrSlug}`,
+                    error: err instanceof Error ? err.message : '登録に失敗しました',
+                  });
+                }
+              })
+            );
           }
 
           return jsonResponse(
@@ -241,7 +247,7 @@ export async function handleApiRequest(
         let newlyLinkedCounterpartCount = 0;
         const errors: Array<{ id: string; name: string; error: string }> = [];
 
-        const concurrency = 3;
+        const concurrency = 6;
         for (let i = 0; i < targetIds.length; i += concurrency) {
           const chunk = targetIds.slice(i, i + concurrency);
           await Promise.all(

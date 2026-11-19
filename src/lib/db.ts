@@ -240,29 +240,51 @@ async function writeSnapshotToIndexedDb(snapshot: DatabaseSnapshot): Promise<voi
   });
 }
 
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingNotifyAutoSync = false;
+
 function schedulePersist(notifyAutoSync = true): Promise<void> {
-  if (notifyAutoSync && typeof window !== 'undefined') {
-    for (const listener of mutationListeners) {
-      try {
-        listener();
-      } catch {
-        // ignore listener errors
+  if (notifyAutoSync) {
+    pendingNotifyAutoSync = true;
+  }
+
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+  }
+
+  return new Promise((resolve) => {
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      const shouldNotify = pendingNotifyAutoSync;
+      pendingNotifyAutoSync = false;
+
+      if (shouldNotify && typeof window !== 'undefined') {
+        for (const listener of mutationListeners) {
+          try {
+            listener();
+          } catch {
+            // ignore listener errors
+          }
+        }
       }
-    }
-  }
-  if (typeof globalThis.indexedDB === 'undefined') {
-    return Promise.resolve();
-  }
-  const clone: DatabaseSnapshot = {
-    ...snapshotState,
-    exportedAt: new Date().toISOString(),
-  };
-  persistChain = persistChain
-    .then(() => writeSnapshotToIndexedDb(clone))
-    .catch((err) => {
-      console.error('Failed to persist IndexedDB snapshot:', err);
-    });
-  return persistChain;
+
+      if (typeof globalThis.indexedDB === 'undefined') {
+        resolve();
+        return;
+      }
+
+      const clone: DatabaseSnapshot = {
+        ...snapshotState,
+        exportedAt: new Date().toISOString(),
+      };
+      persistChain = persistChain
+        .then(() => writeSnapshotToIndexedDb(clone))
+        .catch((err) => {
+          console.error('Failed to persist IndexedDB snapshot:', err);
+        });
+      void persistChain.then(resolve);
+    }, 60);
+  });
 }
 
 function normalizeSnapshot(raw: Partial<DatabaseSnapshot>): DatabaseSnapshot {
