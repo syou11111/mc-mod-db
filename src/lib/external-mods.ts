@@ -692,6 +692,191 @@ export interface LinkedDependencyInfo {
   newlyImported: boolean;
 }
 
+function normalizeModNameForMatch(name: string): string {
+  return name
+    .replace(/\((?:fabric|forge|neoforge|quilt)[^)]*\)/gi, '')
+    .replace(/\[(?:fabric|forge|neoforge|quilt)[^\]]*\]/gi, '')
+    .replace(/[^a-zA-Z0-9\u3040-\u30ff\u4e00-\u9faf]+/g, '')
+    .toLowerCase();
+}
+
+function normalizeCoreModName(name: string): string {
+  const core = name.split(/\s+[-–—:|]\s+|\s*[:|]\s*/)[0] ?? name;
+  return normalizeModNameForMatch(core);
+}
+
+function isModNameCompatible(nameA: string, nameB: string): boolean {
+  const normA = normalizeModNameForMatch(nameA);
+  const normB = normalizeModNameForMatch(nameB);
+  if (!normA || !normB) return false;
+  if (normA === normB) return true;
+
+  const coreA = normalizeCoreModName(nameA);
+  const coreB = normalizeCoreModName(nameB);
+  if (coreA && coreB && coreA === coreB && coreA.length >= 3) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 片方のプラットフォーム（Modrinth または CurseForge）しか紐付いていないMODについて、
+ * もう片方のプラットフォームにも同一MODが存在する場合は自動で検索・統合します（Soft-fail）。
+ */
+async function tryMatchAndMergeCounterpart(
+  mod: ModRecord
+): Promise<ModSource | null> {
+  const targetAuthor = mod.author?.trim().toLowerCase() ?? '';
+  const maps = getExistingExternalIdMaps();
+
+  // 1. Modrinth -> CurseForge
+  if (mod.modrinthId && !mod.curseforgeId) {
+    const apiKey = getCurseForgeApiKey();
+    if (!apiKey) return null;
+
+    interface CfSearchMod {
+      id: number;
+      name: string;
+      slug: string;
+      authors?: Array<{ name: string }>;
+    }
+
+    const slugCandidate = (mod.modrinthSlug ?? mod.slug).trim().toLowerCase();
+    let matchedCfId: string | null = null;
+
+    if (slugCandidate) {
+      const slugQs = new URLSearchParams({
+        gameId: '432',
+        classId: '6',
+        slug: slugCandidate,
+      });
+      const slugRes = await fetchJson<{ data?: CfSearchMod[] }>(
+        `https://api.curseforge.com/v1/mods/search?${slugQs.toString()}`,
+        { 'x-api-key': apiKey }
+      );
+      const exactSlug = (slugRes.data ?? []).find(
+        (m) => m.slug.toLowerCase() === slugCandidate
+      );
+      if (exactSlug) {
+        matchedCfId = String(exactSlug.id);
+      }
+    }
+
+    if (!matchedCfId) {
+      const nameQs = new URLSearchParams({
+        gameId: '432',
+        classId: '6',
+        searchFilter: mod.name,
+        pageSize: '15',
+      });
+      const nameRes = await fetchJson<{ data?: CfSearchMod[] }>(
+        `https://api.curseforge.com/v1/mods/search?${nameQs.toString()}`,
+        { 'x-api-key': apiKey }
+      );
+      const candidates = nameRes.data ?? [];
+      const exactName =
+        candidates.find((m) => {
+          if (m.slug.toLowerCase() === slugCandidate) return true;
+          const authorMatch =
+            Boolean(targetAuthor) &&
+            (m.authors ?? []).some((a) => a.name.toLowerCase() === targetAuthor);
+          return isModNameCompatible(m.name, mod.name) && authorMatch;
+        }) ??
+        candidates.find((m) => isModNameCompatible(m.name, mod.name));
+
+      if (exactName) {
+        matchedCfId = String(exactName.id);
+      }
+    }
+
+    if (matchedCfId) {
+      const existingOwner = maps.byCurseforgeId.get(matchedCfId);
+      if (existingOwner && existingOwner !== mod.id) {
+        return null;
+      }
+      const cfPayload = await fetchCurseForgeMod(matchedCfId);
+      upsertExternalPayload(cfPayload, { mergeIntoModId: mod.id });
+      return 'curseforge';
+    }
+    return null;
+  }
+
+  // 2. CurseForge -> Modrinth
+  if (mod.curseforgeId && !mod.modrinthId) {
+    const slugCandidate = (mod.curseforgeSlug ?? mod.slug).trim().toLowerCase();
+    let matchedMrId: string | null = null;
+
+    if (slugCandidate) {
+      try {
+        const res = await fetch(
+          `https://api.modrinth.com/v2/project/${encodeURIComponent(slugCandidate)}`,
+          {
+            headers: { 'User-Agent': USER_AGENT },
+            cache: 'no-store',
+          }
+        );
+        if (res.ok) {
+          const proj = (await res.json()) as {
+            id?: string;
+            slug?: string;
+            title?: string;
+            project_type?: string;
+          };
+          if (proj?.id && proj.project_type === 'mod') {
+            matchedMrId = proj.id;
+          }
+        }
+      } catch {
+        // fallback to search
+      }
+    }
+
+    if (!matchedMrId) {
+      interface MrSearchHit {
+        project_id: string;
+        slug: string;
+        title: string;
+        author?: string;
+      }
+      const qs = new URLSearchParams({
+        query: mod.name,
+        facets: JSON.stringify([['project_type:mod']]),
+        limit: '15',
+      });
+      const searchRes = await fetchJson<{ hits?: MrSearchHit[] }>(
+        `https://api.modrinth.com/v2/search?${qs.toString()}`
+      );
+      const hits = searchRes.hits ?? [];
+      const exactHit =
+        hits.find((h) => {
+          if (h.slug.toLowerCase() === slugCandidate) return true;
+          const authorMatch =
+            Boolean(targetAuthor) &&
+            Boolean(h.author) &&
+            h.author!.toLowerCase() === targetAuthor;
+          return isModNameCompatible(h.title, mod.name) && authorMatch;
+        }) ?? hits.find((h) => isModNameCompatible(h.title, mod.name));
+
+      if (exactHit) {
+        matchedMrId = exactHit.project_id;
+      }
+    }
+
+    if (matchedMrId) {
+      const existingOwner = maps.byModrinthId.get(matchedMrId);
+      if (existingOwner && existingOwner !== mod.id) {
+        return null;
+      }
+      const mrPayload = await fetchModrinthProjectAndVersions(matchedMrId);
+      upsertExternalPayload(mrPayload, { mergeIntoModId: mod.id });
+      return 'modrinth';
+    }
+    return null;
+  }
+
+  return null;
+}
+
 export async function importModFromExternal(params: {
   source?: ModSource;
   idOrSlug?: string;
@@ -699,10 +884,12 @@ export async function importModFromExternal(params: {
   initialTagIds?: string[];
   mergeIntoModId?: string;
   autoLinkDependencies?: boolean;
+  autoMatchCounterpart?: boolean;
 }): Promise<{
   mod: ModRecord;
   action: 'created' | 'updated' | 'merged';
   linkedDependencies: LinkedDependencyInfo[];
+  matchedCounterpart: ModSource | null;
 }> {
   const parsed = params.input
     ? parseModInput(params.input, params.source)
@@ -725,6 +912,19 @@ export async function importModFromExternal(params: {
   });
 
   let finalMod = result.mod;
+  let matchedCounterpart: ModSource | null = null;
+
+  if (params.autoMatchCounterpart !== false) {
+    try {
+      matchedCounterpart = await tryMatchAndMergeCounterpart(finalMod);
+      if (matchedCounterpart) {
+        finalMod = getModById(finalMod.id) ?? finalMod;
+      }
+    } catch {
+      // Soft-fail: 対向プラットフォームの自動照合に失敗しても本体登録は成功させる
+    }
+  }
+
   let linkedDependencies: LinkedDependencyInfo[] = [];
 
   if (params.autoLinkDependencies) {
@@ -743,6 +943,7 @@ export async function importModFromExternal(params: {
     mod: finalMod,
     action: result.action,
     linkedDependencies,
+    matchedCounterpart,
   };
 }
 
@@ -760,6 +961,15 @@ export async function syncModById(modId: string): Promise<ModRecord> {
   if (current.curseforgeId && getCurseForgeApiKey()) {
     const payload = await fetchCurseForgeMod(current.curseforgeId);
     upsertExternalPayload(payload, { mergeIntoModId: modId });
+  }
+
+  const afterPrimarySync = getModById(modId);
+  if (afterPrimarySync && (!afterPrimarySync.modrinthId || !afterPrimarySync.curseforgeId)) {
+    try {
+      await tryMatchAndMergeCounterpart(afterPrimarySync);
+    } catch {
+      // Soft-fail
+    }
   }
 
   const updated = getModById(modId);
@@ -791,7 +1001,6 @@ export async function fetchAndLinkDependenciesForMod(
   const visitedModIds = options?.visitedModIds ?? new Set<string>();
   visitedModIds.add(modId);
 
-  const prereqTag = createOrGetTag('前提MOD', 'custom', '#64748b');
   const linkedMods: LinkedDependencyInfo[] = [];
   const linkedModIdSet = new Set<string>();
   const directTargetIds = new Set<string>();
@@ -810,21 +1019,26 @@ export async function fetchAndLinkDependenciesForMod(
           ? maps.byModrinthId.get(externalId)
           : maps.byCurseforgeId.get(externalId);
       let newlyImported = false;
+      let wasAlreadyInDb = Boolean(depLocalId);
       let depName = '';
 
       if (!depLocalId) {
         const res = await importModFromExternal({
           source,
           idOrSlug: externalId,
-          initialTagIds: [prereqTag.id],
           autoLinkDependencies: false,
         });
         depLocalId = res.mod.id;
         depName = res.mod.name;
         newlyImported = res.action === 'created';
+        wasAlreadyInDb = !newlyImported;
+
+        if (newlyImported) {
+          const prereqTag = createOrGetTag('前提MOD', 'custom', '#64748b');
+          attachTagToMod(depLocalId, prereqTag.id);
+        }
       } else {
         depName = getModById(depLocalId)?.name ?? externalId;
-        attachTagToMod(depLocalId, prereqTag.id);
       }
 
       if (depLocalId && depLocalId !== modId && !directTargetIds.has(depLocalId)) {
@@ -837,6 +1051,7 @@ export async function fetchAndLinkDependenciesForMod(
         }
 
         if (
+          !wasAlreadyInDb &&
           maxDepth > 1 &&
           !visitedModIds.has(depLocalId) &&
           linkedMods.length < MAX_LINKED_DEPENDENCIES

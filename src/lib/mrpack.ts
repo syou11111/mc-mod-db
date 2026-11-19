@@ -482,3 +482,313 @@ export async function buildMrpackArchive(params: {
     indexJson,
   };
 }
+
+export interface ParsedModpackEntry {
+  source: 'modrinth' | 'curseforge';
+  idOrSlug: string;
+  required: boolean;
+  label: string;
+}
+
+export interface ParsedModpackResult {
+  format: 'mrpack' | 'curseforge-manifest';
+  name: string;
+  summary: string;
+  mcVersion: string | null;
+  loader: string | null;
+  entries: ParsedModpackEntry[];
+  unresolvedCount: number;
+}
+
+async function inflateRawBytes(
+  data: Uint8Array,
+  method: number
+): Promise<Uint8Array> {
+  if (method === 0) return data;
+  if (method !== 8) {
+    throw new Error(`未対応のZIP圧縮方式です (method=${method})`);
+  }
+  if (typeof DecompressionStream === 'undefined') {
+    throw new Error('お使いのブラウザは DecompressionStream に対応していません');
+  }
+  const copy = new Uint8Array(data.byteLength);
+  copy.set(data);
+  const ds = new DecompressionStream('deflate-raw');
+  const writer = ds.writable.getWriter();
+  void writer.write(copy).then(() => writer.close());
+  const buf = await new Response(ds.readable).arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+/**
+ * Pure Web API (`DataView` + `DecompressionStream`) を使って ZIP / .mrpack から指定ファイルを読み取ります。
+ */
+export async function extractZipEntryText(
+  zipBytes: Uint8Array,
+  targetFilenames: string[]
+): Promise<{ filename: string; text: string } | null> {
+  const view = new DataView(zipBytes.buffer, zipBytes.byteOffset, zipBytes.byteLength);
+  const decoder = new TextDecoder('utf-8');
+  const targets = new Set(targetFilenames.map((f) => f.toLowerCase()));
+
+  // Locate End of Central Directory (0x06054b50)
+  const minEocdOffset = Math.max(0, zipBytes.byteLength - 65557);
+  let eocdOffset = -1;
+  for (let i = zipBytes.byteLength - 22; i >= minEocdOffset; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset === -1) {
+    throw new Error('有効な ZIP / .mrpack ファイルではありません');
+  }
+
+  const cdSize = view.getUint32(eocdOffset + 12, true);
+  const cdOffset = view.getUint32(eocdOffset + 16, true);
+  let cursor = cdOffset;
+  const cdEnd = cdOffset + cdSize;
+
+  while (cursor + 46 <= cdEnd && cursor + 46 <= zipBytes.byteLength) {
+    if (view.getUint32(cursor, true) !== 0x02014b50) break;
+    const method = view.getUint16(cursor + 10, true);
+    const compSize = view.getUint32(cursor + 20, true);
+    const nameLen = view.getUint16(cursor + 28, true);
+    const extraLen = view.getUint16(cursor + 30, true);
+    const commentLen = view.getUint16(cursor + 32, true);
+    const localHeaderOffset = view.getUint32(cursor + 42, true);
+
+    const entryName = decoder.decode(
+      zipBytes.subarray(cursor + 46, cursor + 46 + nameLen)
+    );
+    cursor += 46 + nameLen + extraLen + commentLen;
+
+    const normalizedName = entryName.replace(/^\.\//, '').toLowerCase();
+    if (!targets.has(normalizedName)) continue;
+
+    if (
+      localHeaderOffset + 30 > zipBytes.byteLength ||
+      view.getUint32(localHeaderOffset, true) !== 0x04034b50
+    ) {
+      throw new Error(`ZIPローカルヘッダの読み取りに失敗しました: ${entryName}`);
+    }
+    const localNameLen = view.getUint16(localHeaderOffset + 26, true);
+    const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
+    const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+    const compressedSlice = zipBytes.subarray(dataStart, dataStart + compSize);
+    const rawBytes = await inflateRawBytes(compressedSlice, method);
+    return {
+      filename: normalizedName,
+      text: decoder.decode(rawBytes),
+    };
+  }
+
+  return null;
+}
+
+export async function parseModpackBytes(params: {
+  filename: string;
+  bytes: Uint8Array;
+}): Promise<ParsedModpackResult> {
+  const lowerName = params.filename.toLowerCase();
+  let jsonText: string;
+
+  if (lowerName.endsWith('.json')) {
+    jsonText = new TextDecoder('utf-8').decode(params.bytes);
+  } else {
+    const extracted = await extractZipEntryText(params.bytes, [
+      'modrinth.index.json',
+      'manifest.json',
+    ]);
+    if (!extracted) {
+      throw new Error(
+        '.mrpack / ZIP 内に modrinth.index.json または manifest.json が見つかりませんでした'
+      );
+    }
+    jsonText = extracted.text;
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(jsonText) as Record<string, unknown>;
+  } catch {
+    throw new Error('モッドパックの JSON 解析に失敗しました');
+  }
+
+  // 1. Modrinth modrinth.index.json
+  if (
+    parsed.game === 'minecraft' &&
+    Array.isArray(parsed.files) &&
+    typeof parsed.formatVersion === 'number'
+  ) {
+    const deps = (parsed.dependencies ?? {}) as Record<string, string>;
+    const mcVersion = typeof deps.minecraft === 'string' ? deps.minecraft : null;
+    let loader: string | null = null;
+    if (deps['fabric-loader']) loader = 'fabric';
+    else if (deps.neoforge) loader = 'neoforge';
+    else if (deps.forge) loader = 'forge';
+    else if (deps['quilt-loader']) loader = 'quilt';
+
+    interface MrIndexFileRaw {
+      path?: string;
+      hashes?: { sha1?: string };
+      downloads?: string[];
+      env?: { client?: string; server?: string };
+    }
+
+    const modFiles = (parsed.files as MrIndexFileRaw[]).filter((f) => {
+      const p = (f.path ?? '').toLowerCase();
+      return p.startsWith('mods/') || p.endsWith('.jar');
+    });
+
+    const entriesMap = new Map<string, ParsedModpackEntry>();
+    const pendingHashes: Array<{ sha1: string; label: string; required: boolean }> = [];
+
+    for (const f of modFiles) {
+      const label = (f.path ?? '').split('/').pop() || 'mod';
+      const required = f.env?.client !== 'optional' || f.env?.server !== 'optional';
+      let projectId: string | null = null;
+
+      for (const dl of f.downloads ?? []) {
+        const m = dl.match(/cdn\.modrinth\.com\/data\/([a-zA-Z0-9]+)\//);
+        if (m?.[1]) {
+          projectId = m[1];
+          break;
+        }
+      }
+
+      if (projectId) {
+        if (!entriesMap.has(projectId)) {
+          entriesMap.set(projectId, {
+            source: 'modrinth',
+            idOrSlug: projectId,
+            required,
+            label,
+          });
+        }
+      } else if (f.hashes?.sha1) {
+        pendingHashes.push({
+          sha1: f.hashes.sha1.toLowerCase(),
+          label,
+          required,
+        });
+      }
+    }
+
+    let unresolvedCount = 0;
+    for (let i = 0; i < pendingHashes.length; i += 100) {
+      const chunk = pendingHashes.slice(i, i + 100);
+      try {
+        const res = await fetch('https://api.modrinth.com/v2/version_files', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': USER_AGENT,
+          },
+          body: JSON.stringify({
+            hashes: chunk.map((c) => c.sha1),
+            algorithm: 'sha1',
+          }),
+          cache: 'no-store',
+        });
+        if (res.ok) {
+          const map = (await res.json()) as Record<
+            string,
+            { project_id?: string }
+          >;
+          for (const item of chunk) {
+            const ver = map[item.sha1];
+            if (ver?.project_id) {
+              if (!entriesMap.has(ver.project_id)) {
+                entriesMap.set(ver.project_id, {
+                  source: 'modrinth',
+                  idOrSlug: ver.project_id,
+                  required: item.required,
+                  label: item.label,
+                });
+              }
+            } else {
+              unresolvedCount += 1;
+            }
+          }
+        } else {
+          unresolvedCount += chunk.length;
+        }
+      } catch {
+        unresolvedCount += chunk.length;
+      }
+    }
+
+    return {
+      format: 'mrpack',
+      name:
+        (typeof parsed.name === 'string' && parsed.name.trim()) ||
+        params.filename.replace(/\.(mrpack|zip|json)$/i, ''),
+      summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+      mcVersion,
+      loader,
+      entries: Array.from(entriesMap.values()),
+      unresolvedCount,
+    };
+  }
+
+  // 2. CurseForge manifest.json
+  if (Array.isArray(parsed.files)) {
+    const mcObj = (parsed.minecraft ?? {}) as {
+      version?: string;
+      modLoaders?: Array<{ id?: string }>;
+    };
+    const mcVersion = typeof mcObj.version === 'string' ? mcObj.version : null;
+    const rawLoader = mcObj.modLoaders?.[0]?.id?.toLowerCase() ?? '';
+    let loader: string | null = null;
+    if (rawLoader.startsWith('fabric')) loader = 'fabric';
+    else if (rawLoader.startsWith('neoforge')) loader = 'neoforge';
+    else if (rawLoader.startsWith('forge')) loader = 'forge';
+    else if (rawLoader.startsWith('quilt')) loader = 'quilt';
+
+    interface CfManifestFile {
+      projectID?: number;
+      fileID?: number;
+      required?: boolean;
+    }
+
+    const entriesMap = new Map<string, ParsedModpackEntry>();
+    for (const f of parsed.files as CfManifestFile[]) {
+      if (typeof f.projectID === 'number' && f.projectID > 0) {
+        const pid = String(f.projectID);
+        if (!entriesMap.has(pid)) {
+          entriesMap.set(pid, {
+            source: 'curseforge',
+            idOrSlug: pid,
+            required: f.required !== false,
+            label: `CurseForge #${pid}`,
+          });
+        }
+      }
+    }
+
+    if (entriesMap.size === 0) {
+      throw new Error('モッドパック内に有効なMODエントリが見つかりませんでした');
+    }
+
+    return {
+      format: 'curseforge-manifest',
+      name:
+        (typeof parsed.name === 'string' && parsed.name.trim()) ||
+        params.filename.replace(/\.(zip|json)$/i, ''),
+      summary:
+        typeof parsed.author === 'string' && parsed.author
+          ? `Author: ${parsed.author}`
+          : '',
+      mcVersion,
+      loader,
+      entries: Array.from(entriesMap.values()),
+      unresolvedCount: 0,
+    };
+  }
+
+  throw new Error(
+    '対応していない形式です（Modrinth .mrpack / modrinth.index.json または CurseForge manifest.json に対応）'
+  );
+}
+

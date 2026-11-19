@@ -682,6 +682,20 @@ export function attachTagToMod(modId: string, tagId: string): void {
   }
 }
 
+export function detachTagFromMod(modId: string, tagId: string): void {
+  const before = snapshotState.modTags.length;
+  snapshotState.modTags = snapshotState.modTags.filter(
+    (mt) => !(mt.mod_id === modId && mt.tag_id === tagId)
+  );
+  if (snapshotState.modTags.length !== before) {
+    void schedulePersist();
+  }
+}
+
+export function listAllModIds(): string[] {
+  return snapshotState.mods.map((m) => m.id);
+}
+
 export function updateTag(
   id: string,
   updates: { name?: string; color?: string }

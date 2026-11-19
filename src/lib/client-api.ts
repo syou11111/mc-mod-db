@@ -2,19 +2,23 @@ import {
   type DatabaseSnapshot,
   addModRelation,
   addTagRelation,
+  attachTagToMod,
   createOrGetTag,
   createPreset,
   deleteMod,
   deletePreset,
   deleteSetting,
   deleteTag,
+  detachTagFromMod,
   ensureDbInitialized,
   exportDatabaseSnapshot,
   getDbStats,
+  getExistingExternalIdMaps,
   getModById,
   getPresetById,
   getSetting,
   importDatabaseSnapshot,
+  listAllModIds,
   listAllTags,
   listPresets,
   removeModRelation,
@@ -43,7 +47,7 @@ import {
   setGistAutoSyncEnabled,
   verifyAndSaveGitHubToken,
 } from '@/lib/gist-sync';
-import { buildMrpackArchive } from '@/lib/mrpack';
+import { buildMrpackArchive, parseModpackBytes } from '@/lib/mrpack';
 import type {
   ModRelationType,
   ModSide,
@@ -205,10 +209,114 @@ export async function handleApiRequest(
           mod: res.mod,
           action: res.action,
           linkedDependencies: res.linkedDependencies,
+          matchedCounterpart: res.matchedCounterpart,
           imported: [{ mod: res.mod, action: res.action }],
           errors: [],
         });
       }
+    }
+
+    // 1.5 /api/mods/bulk
+    if (apiPath === '/api/mods/bulk' && method === 'POST') {
+      const body = (await parseRequestJson(input, init)) as {
+        action?: 'sync' | 'status' | 'addTag' | 'removeTag' | 'delete';
+        modIds?: string[] | 'all';
+        status?: ModStatus;
+        tagId?: string;
+      };
+
+      const targetIds =
+        body.modIds === 'all'
+          ? listAllModIds()
+          : Array.isArray(body.modIds)
+            ? Array.from(new Set(body.modIds.filter(Boolean)))
+            : [];
+
+      if (targetIds.length === 0) {
+        return jsonResponse({ error: '対象のMODが指定されていません' }, 400);
+      }
+
+      if (body.action === 'sync') {
+        let updatedCount = 0;
+        let newlyLinkedCounterpartCount = 0;
+        const errors: Array<{ id: string; name: string; error: string }> = [];
+
+        const concurrency = 3;
+        for (let i = 0; i < targetIds.length; i += concurrency) {
+          const chunk = targetIds.slice(i, i + concurrency);
+          await Promise.all(
+            chunk.map(async (id) => {
+              const before = getModById(id);
+              try {
+                const hadBoth = Boolean(before?.modrinthId && before?.curseforgeId);
+                const after = await syncModById(id);
+                updatedCount += 1;
+                if (!hadBoth && after.modrinthId && after.curseforgeId) {
+                  newlyLinkedCounterpartCount += 1;
+                }
+              } catch (err) {
+                errors.push({
+                  id,
+                  name: before?.name ?? id,
+                  error: err instanceof Error ? err.message : '同期に失敗しました',
+                });
+              }
+            })
+          );
+        }
+
+        return jsonResponse({
+          updatedCount,
+          newlyLinkedCounterpartCount,
+          failedCount: errors.length,
+          errors,
+        });
+      }
+
+      if (body.action === 'status') {
+        if (!body.status) {
+          return jsonResponse({ error: '変更後のステータスを指定してください' }, 400);
+        }
+        let updatedCount = 0;
+        for (const id of targetIds) {
+          if (updateModMetadata(id, { status: body.status })) {
+            updatedCount += 1;
+          }
+        }
+        return jsonResponse({ updatedCount });
+      }
+
+      if (body.action === 'addTag') {
+        if (!body.tagId) {
+          return jsonResponse({ error: '付与するタグを指定してください' }, 400);
+        }
+        for (const id of targetIds) {
+          attachTagToMod(id, body.tagId);
+        }
+        return jsonResponse({ updatedCount: targetIds.length });
+      }
+
+      if (body.action === 'removeTag') {
+        if (!body.tagId) {
+          return jsonResponse({ error: '解除するタグを指定してください' }, 400);
+        }
+        for (const id of targetIds) {
+          detachTagFromMod(id, body.tagId);
+        }
+        return jsonResponse({ updatedCount: targetIds.length });
+      }
+
+      if (body.action === 'delete') {
+        let deletedCount = 0;
+        for (const id of targetIds) {
+          if (deleteMod(id)) {
+            deletedCount += 1;
+          }
+        }
+        return jsonResponse({ deletedCount });
+      }
+
+      return jsonResponse({ error: '不正な一括操作アクションです' }, 400);
     }
 
     // 2. /api/mods/:id/sync
@@ -455,6 +563,105 @@ export async function handleApiRequest(
       }
 
       return jsonResponse(result);
+    }
+
+    // 10.5 /api/presets/import
+    if (apiPath === '/api/presets/import' && method === 'POST') {
+      const body = (await parseRequestJson(input, init)) as {
+        filename?: string;
+        base64?: string;
+        presetName?: string;
+      };
+
+      if (!body.filename || !body.base64) {
+        return jsonResponse(
+          { error: '読み込むファイルデータが見つかりません' },
+          400
+        );
+      }
+
+      const binaryStr = atob(body.base64);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) {
+        bytes[i] = binaryStr.charCodeAt(i);
+      }
+
+      const parsed = await parseModpackBytes({
+        filename: body.filename,
+        bytes,
+      });
+
+      if (parsed.entries.length === 0) {
+        return jsonResponse(
+          { error: 'モッドパック内にインポート可能なMODが見つかりませんでした' },
+          400
+        );
+      }
+
+      const preset = createPreset({
+        name: body.presetName?.trim() || parsed.name,
+        description: parsed.summary || `${parsed.format} インポート`,
+        color: '#10b981',
+      });
+
+      let newlyImportedCount = 0;
+      let existingMatchedCount = 0;
+      const failedEntries: Array<{ label: string; error: string }> = [];
+
+      const concurrency = 3;
+      for (let i = 0; i < parsed.entries.length; i += concurrency) {
+        const chunk = parsed.entries.slice(i, i + concurrency);
+        await Promise.all(
+          chunk.map(async (entry) => {
+            try {
+              const maps = getExistingExternalIdMaps();
+              let modId =
+                entry.source === 'modrinth'
+                  ? maps.byModrinthId.get(entry.idOrSlug)
+                  : maps.byCurseforgeId.get(entry.idOrSlug);
+
+              if (modId) {
+                existingMatchedCount += 1;
+              } else {
+                const res = await importModFromExternal({
+                  source: entry.source,
+                  idOrSlug: entry.idOrSlug,
+                  autoLinkDependencies: false,
+                  autoMatchCounterpart: true,
+                });
+                modId = res.mod.id;
+                if (res.action === 'created') {
+                  newlyImportedCount += 1;
+                } else {
+                  existingMatchedCount += 1;
+                }
+              }
+
+              upsertPresetItem(preset.id, {
+                modId,
+                requirement: entry.required ? 'required' : 'optional',
+              });
+            } catch (err) {
+              failedEntries.push({
+                label: entry.label,
+                error: err instanceof Error ? err.message : '取得失敗',
+              });
+            }
+          })
+        );
+      }
+
+      const finalPreset = getPresetById(preset.id) ?? preset;
+      return jsonResponse({
+        preset: finalPreset,
+        mcVersion: parsed.mcVersion,
+        loader: parsed.loader,
+        totalEntries: parsed.entries.length,
+        newlyImportedCount,
+        existingMatchedCount,
+        failedEntries,
+        unresolvedCount: parsed.unresolvedCount,
+      });
     }
 
     // 11. /api/presets/:id

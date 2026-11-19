@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
+  CheckSquare,
   Cloud,
   Database,
   ExternalLink,
@@ -16,10 +17,12 @@ import {
   Loader2,
   Pencil,
   Plus,
+  RefreshCw,
   RotateCcw,
   Search,
   Settings,
   Sparkles,
+  Square,
   Tag as TagIcon,
   Trash2,
 } from 'lucide-react';
@@ -31,6 +34,7 @@ import {
   TAG_PALETTE,
   TagPill,
   formatDownloads,
+  formatLinkedDependenciesText,
   isReleaseMcVersionClient,
 } from '@/components/ModBadges';
 import { ModDetailDrawer } from '@/components/ModDetailDrawer';
@@ -152,6 +156,125 @@ export default function HomePage() {
   const [detailModId, setDetailModId] = useState<string | null>(null);
   const [seedingSamples, setSeedingSamples] = useState(false);
 
+  // Bulk selection & actions
+  const [selectedModIds, setSelectedModIds] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkTargetStatus, setBulkTargetStatus] = useState<ModStatus>('adopted');
+  const [bulkTargetTagId, setBulkTargetTagId] = useState<string>('');
+  const [bulkNotice, setBulkNotice] = useState<{
+    type: 'ok' | 'err';
+    text: string;
+  } | null>(null);
+
+  function toggleModSelection(id: string) {
+    setSelectedModIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAllVisible() {
+    if (mods.length === 0) return;
+    const allVisibleSelected = mods.every((m) => selectedModIds.has(m.id));
+    setSelectedModIds((prev) => {
+      const next = new Set(prev);
+      if (allVisibleSelected) {
+        for (const m of mods) next.delete(m.id);
+      } else {
+        for (const m of mods) next.add(m.id);
+      }
+      return next;
+    });
+  }
+
+  async function handleBulkAction(
+    action: 'sync' | 'status' | 'addTag' | 'removeTag' | 'delete',
+    overrideIds?: 'all'
+  ) {
+    const targetIds = overrideIds === 'all' ? 'all' : Array.from(selectedModIds);
+    if (targetIds !== 'all' && targetIds.length === 0) return;
+
+    if (action === 'delete') {
+      const count = targetIds === 'all' ? totalCount : targetIds.length;
+      if (!window.confirm(`選択中の ${count} 件のMODをDBから削除しますか？`)) {
+        return;
+      }
+    }
+    if (action === 'addTag' || action === 'removeTag') {
+      if (!bulkTargetTagId) {
+        setBulkNotice({ type: 'err', text: '対象のタグを選択してください' });
+        return;
+      }
+    }
+
+    setBulkBusy(true);
+    setBulkNotice(null);
+    try {
+      const res = await fetch('/api/mods/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          modIds: targetIds,
+          status: action === 'status' ? bulkTargetStatus : undefined,
+          tagId:
+            action === 'addTag' || action === 'removeTag'
+              ? bulkTargetTagId
+              : undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || '一括操作に失敗しました');
+      }
+
+      if (action === 'sync') {
+        const dualText =
+          data.newlyLinkedCounterpartCount > 0
+            ? `（うち ${data.newlyLinkedCounterpartCount}件で Modrinth/CurseForge 両方連携を追加）`
+            : '';
+        const failText =
+          data.failedCount > 0 ? ` / ${data.failedCount}件失敗` : '';
+        setBulkNotice({
+          type: 'ok',
+          text: `${data.updatedCount ?? 0} 件のMODを最新化しました${dualText}${failText}`,
+        });
+      } else if (action === 'status') {
+        setBulkNotice({
+          type: 'ok',
+          text: `${data.updatedCount ?? 0} 件のステータスを変更しました`,
+        });
+      } else if (action === 'addTag') {
+        setBulkNotice({
+          type: 'ok',
+          text: `${data.updatedCount ?? 0} 件にタグを付与しました`,
+        });
+      } else if (action === 'removeTag') {
+        setBulkNotice({
+          type: 'ok',
+          text: `${data.updatedCount ?? 0} 件からタグを解除しました`,
+        });
+      } else if (action === 'delete') {
+        setSelectedModIds(new Set());
+        setBulkNotice({
+          type: 'ok',
+          text: `${data.deletedCount ?? 0} 件のMODを削除しました`,
+        });
+      }
+
+      await fetchMods();
+    } catch (err) {
+      setBulkNotice({
+        type: 'err',
+        text: err instanceof Error ? err.message : '一括操作に失敗しました',
+      });
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   const fetchMods = useCallback(async () => {
     setLoadingMods(true);
     try {
@@ -246,13 +369,14 @@ export default function HomePage() {
             : '登録しました';
       const deps: Array<{ name: string; newlyImported: boolean }> =
         Array.isArray(data.linkedDependencies) ? data.linkedDependencies : [];
-      const depSuffix =
-        deps.length > 0
-          ? `（前提MOD ${deps.length}件も連携: ${deps.map((d) => d.name).join(', ')}）`
-          : '';
+      const depSummary = formatLinkedDependenciesText(deps);
+      const depSuffix = depSummary ? `（${depSummary}）` : '';
+      const dualSuffix = data.matchedCounterpart
+        ? ` [Modrinth・CurseForge 両方連携]`
+        : '';
       setQuickNotice({
         type: 'ok',
-        text: `「${data.mod?.name ?? 'MOD'}」を${actionLabel}${depSuffix}`,
+        text: `「${data.mod?.name ?? 'MOD'}」を${actionLabel}${dualSuffix}${depSuffix}`,
       });
       setQuickUrl('');
       fetchMods();
@@ -1098,10 +1222,43 @@ export default function HomePage() {
                   />
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xs text-slate-400">
                     <strong className="text-white">{mods.length}</strong> / {totalCount} 件
                   </span>
+
+                  {mods.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={toggleSelectAllVisible}
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-2 text-xs text-slate-300 hover:border-slate-500 hover:text-white"
+                      title="表示中のMODをすべて選択 / 解除"
+                    >
+                      {mods.every((m) => selectedModIds.has(m.id)) ? (
+                        <CheckSquare className="h-3.5 w-3.5 text-emerald-400" />
+                      ) : (
+                        <Square className="h-3.5 w-3.5" />
+                      )}
+                      {mods.every((m) => selectedModIds.has(m.id)) ? '全解除' : '全選択'}
+                    </button>
+                  )}
+
+                  {totalCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handleBulkAction('sync', 'all')}
+                      disabled={bulkBusy}
+                      className="inline-flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2.5 py-2 text-xs font-medium text-sky-200 hover:bg-sky-500/20 disabled:opacity-50"
+                      title="DB内の全MODを最新化し、Modrinth/CurseForge未連携分も自動で紐付けます"
+                    >
+                      {bulkBusy ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-3.5 w-3.5" />
+                      )}
+                      全件同期
+                    </button>
+                  )}
 
                   <select
                     value={sort}
@@ -1142,6 +1299,124 @@ export default function HomePage() {
                   </div>
                 </div>
               </div>
+
+              {/* Bulk Action Bar & Notice */}
+              {selectedModIds.size > 0 && (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/40 bg-emerald-950/30 px-3.5 py-2.5 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-emerald-300">
+                      {selectedModIds.size} 件選択中
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedModIds(new Set())}
+                      className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-slate-300 hover:text-white"
+                    >
+                      選択解除
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleBulkAction('sync')}
+                      disabled={bulkBusy}
+                      className="inline-flex items-center gap-1 rounded-lg bg-sky-600 px-2.5 py-1.5 font-semibold text-white hover:bg-sky-500 disabled:opacity-50"
+                    >
+                      {bulkBusy ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-3.5 w-3.5" />
+                      )}
+                      一括同期
+                    </button>
+
+                    <div className="flex items-center gap-1">
+                      <select
+                        value={bulkTargetStatus}
+                        onChange={(e) =>
+                          setBulkTargetStatus(e.target.value as ModStatus)
+                        }
+                        className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-200"
+                      >
+                        <option value="adopted">採用</option>
+                        <option value="candidate">候補</option>
+                        <option value="deprecated">非推奨</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => handleBulkAction('status')}
+                        disabled={bulkBusy}
+                        className="rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50"
+                      >
+                        状態変更
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-1">
+                      <select
+                        value={bulkTargetTagId}
+                        onChange={(e) => setBulkTargetTagId(e.target.value)}
+                        className="max-w-[140px] rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-200"
+                      >
+                        <option value="">タグを選択...</option>
+                        {allTags
+                          .filter((t) => t.kind === 'custom')
+                          .map((t) => (
+                            <option key={t.id} value={t.id}>
+                              {t.name}
+                            </option>
+                          ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => handleBulkAction('addTag')}
+                        disabled={bulkBusy || !bulkTargetTagId}
+                        className="rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2 py-1.5 font-medium text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-50"
+                      >
+                        +付与
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleBulkAction('removeTag')}
+                        disabled={bulkBusy || !bulkTargetTagId}
+                        className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1.5 font-medium text-slate-300 hover:bg-slate-700 disabled:opacity-50"
+                      >
+                        -解除
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleBulkAction('delete')}
+                      disabled={bulkBusy}
+                      className="inline-flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1.5 font-medium text-rose-200 hover:bg-rose-500/25 disabled:opacity-50"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      一括削除
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {bulkNotice && (
+                <div
+                  className={`flex items-center justify-between rounded-xl border px-3.5 py-2 text-xs ${
+                    bulkNotice.type === 'ok'
+                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+                      : 'border-rose-500/40 bg-rose-500/10 text-rose-200'
+                  }`}
+                >
+                  <span>{bulkNotice.text}</span>
+                  <button
+                    type="button"
+                    onClick={() => setBulkNotice(null)}
+                    className="ml-2 text-slate-400 hover:text-white"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
 
               {/* Results Area */}
               {loadingMods && mods.length === 0 ? (
@@ -1211,14 +1486,39 @@ export default function HomePage() {
                       (releaseVers.length > 0 ? releaseVers.length : mod.mcVersions.length) -
                       displayVers.length;
 
+                    const isSelected = selectedModIds.has(mod.id);
+
                     return (
                       <div
                         key={mod.id}
                         onClick={() => setDetailModId(mod.id)}
-                        className="group relative flex cursor-pointer flex-col justify-between rounded-xl border border-slate-800 bg-[#111827] p-4 transition hover:border-emerald-500/50 hover:bg-[#141d2e]"
+                        className={`group relative flex cursor-pointer flex-col justify-between rounded-xl border p-4 transition ${
+                          isSelected
+                            ? 'border-emerald-500/80 bg-emerald-950/20'
+                            : 'border-slate-800 bg-[#111827] hover:border-emerald-500/50 hover:bg-[#141d2e]'
+                        }`}
                       >
                         <div className="space-y-3">
                           <div className="flex items-start gap-3">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleModSelection(mod.id);
+                              }}
+                              className={`mt-0.5 shrink-0 rounded p-0.5 transition ${
+                                isSelected
+                                  ? 'text-emerald-400'
+                                  : 'text-slate-600 opacity-70 hover:text-slate-300 group-hover:opacity-100'
+                              }`}
+                              title={isSelected ? '選択を解除' : '一括操作用に選択'}
+                            >
+                              {isSelected ? (
+                                <CheckSquare className="h-4 w-4" />
+                              ) : (
+                                <Square className="h-4 w-4" />
+                              )}
+                            </button>
                             {mod.iconUrl ? (
                               <img
                                 src={mod.iconUrl}
@@ -1380,6 +1680,21 @@ export default function HomePage() {
                   <table className="w-full text-left text-xs">
                     <thead className="border-b border-slate-800 bg-slate-950/70 text-slate-400">
                       <tr>
+                        <th className="w-10 px-3 py-3">
+                          <button
+                            type="button"
+                            onClick={toggleSelectAllVisible}
+                            className="text-slate-400 hover:text-white"
+                            title="すべて選択 / 解除"
+                          >
+                            {mods.length > 0 &&
+                            mods.every((m) => selectedModIds.has(m.id)) ? (
+                              <CheckSquare className="h-4 w-4 text-emerald-400" />
+                            ) : (
+                              <Square className="h-4 w-4" />
+                            )}
+                          </button>
+                        </th>
                         <th className="px-4 py-3 font-semibold">MOD</th>
                         <th className="px-3 py-3 font-semibold">状態</th>
                         <th className="px-3 py-3 font-semibold">ローダー</th>
@@ -1397,12 +1712,37 @@ export default function HomePage() {
                         const topVers = (
                           releaseVers.length > 0 ? releaseVers : mod.mcVersions
                         ).slice(0, 3);
+                        const isSelected = selectedModIds.has(mod.id);
                         return (
                           <tr
                             key={mod.id}
                             onClick={() => setDetailModId(mod.id)}
-                            className="cursor-pointer hover:bg-slate-800/40"
+                            className={`cursor-pointer ${
+                              isSelected
+                                ? 'bg-emerald-950/25 hover:bg-emerald-950/35'
+                                : 'hover:bg-slate-800/40'
+                            }`}
                           >
+                            <td
+                              className="px-3 py-3"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleModSelection(mod.id);
+                              }}
+                            >
+                              <button
+                                type="button"
+                                className={
+                                  isSelected ? 'text-emerald-400' : 'text-slate-500 hover:text-slate-300'
+                                }
+                              >
+                                {isSelected ? (
+                                  <CheckSquare className="h-4 w-4" />
+                                ) : (
+                                  <Square className="h-4 w-4" />
+                                )}
+                              </button>
+                            </td>
                             <td className="px-4 py-3">
                               <div className="flex items-center gap-2.5">
                                 {mod.iconUrl ? (
