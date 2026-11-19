@@ -21,6 +21,7 @@ import {
   SIDE_LABELS,
   TAG_PALETTE,
   formatDownloads,
+  formatLinkedDependenciesText,
   isReleaseMcVersionClient,
 } from '@/components/ModBadges';
 import type {
@@ -366,12 +367,11 @@ export function ModDetailDrawer({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || '前提MODの検出に失敗しました');
       setMod(data.mod);
-      const count = data.linkedMods?.length ?? 0;
+      const linked = Array.isArray(data.linkedMods) ? data.linkedMods : [];
+      const summary = formatLinkedDependenciesText(linked);
       setNotice(
-        count > 0
-          ? `必須の前提MOD ${count} 件を検出・紐付けしました（${data.linkedMods
-              .map((l: { name: string }) => l.name)
-              .join(', ')}）`
+        summary
+          ? `必須の${summary}`
           : 'API上に必須の前提MODは見当たりませんでした'
       );
       onUpdated();

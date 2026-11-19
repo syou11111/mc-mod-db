@@ -145,3 +145,20 @@ export function TagPill({
     </span>
   );
 }
+
+export function formatLinkedDependenciesText(
+  deps: Array<{ name: string; newlyImported?: boolean }>
+): string {
+  if (deps.length === 0) return '';
+  const newlyAdded = deps.filter((d) => d.newlyImported);
+  const existing = deps.filter((d) => !d.newlyImported);
+
+  if (newlyAdded.length > 0 && existing.length > 0) {
+    return `前提MOD ${deps.length}件連携（新規登録 ${newlyAdded.length}件: ${newlyAdded.map((d) => d.name).join(', ')} / 既存DB紐付け ${existing.length}件: ${existing.map((d) => d.name).join(', ')}）`;
+  }
+  if (newlyAdded.length > 0) {
+    return `前提MOD ${newlyAdded.length}件を新規登録・連携（${newlyAdded.map((d) => d.name).join(', ')}）`;
+  }
+  return `既存DBの前提MOD ${existing.length}件を紐付け（${existing.map((d) => d.name).join(', ')}）`;
+}
+

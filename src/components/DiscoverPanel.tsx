@@ -11,7 +11,11 @@ import {
   Search,
   Square,
 } from 'lucide-react';
-import { LoaderBadge, formatDownloads } from '@/components/ModBadges';
+import {
+  LoaderBadge,
+  formatDownloads,
+  formatLinkedDependenciesText,
+} from '@/components/ModBadges';
 import type { DiscoverModItem, ModTag } from '@/types/mod';
 
 const PRESET_VERSIONS = [
@@ -169,11 +173,12 @@ export function DiscoverPanel({
       const linked: Array<{ name: string; newlyImported: boolean }> =
         Array.isArray(data.linkedDependencies) ? data.linkedDependencies : [];
       markItemsAsImported(new Set([key]), linked);
-      const depText =
-        linked.length > 0
-          ? `（前提MOD ${linked.length}件を自動連携: ${linked.map((d) => d.name).join(', ')}）`
-          : '';
-      setFeedback(`「${item.name}」をマイDBに登録しました${depText}`);
+      const depSummary = formatLinkedDependenciesText(linked);
+      const depText = depSummary ? `（${depSummary}）` : '';
+      const dualText = data.matchedCounterpart
+        ? ' [Modrinth・CurseForge 両方連携]'
+        : '';
+      setFeedback(`「${item.name}」をマイDBに登録しました${dualText}${depText}`);
       onImported();
     } catch (err) {
       setError(err instanceof Error ? err.message : '登録に失敗しました');
@@ -213,10 +218,8 @@ export function DiscoverPanel({
       const errorCount = data.errors?.length ?? 0;
       const linked: Array<{ name: string; newlyImported: boolean }> =
         Array.isArray(data.linkedDependencies) ? data.linkedDependencies : [];
-      const depText =
-        linked.length > 0
-          ? ` / 前提MOD ${linked.length}件連携 (${linked.map((d) => d.name).join(', ')})`
-          : '';
+      const depSummary = formatLinkedDependenciesText(linked);
+      const depText = depSummary ? ` / ${depSummary}` : '';
 
       markItemsAsImported(
         new Set(targets.map((t) => itemKey(t))),

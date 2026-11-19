@@ -15,6 +15,7 @@ import {
   Plus,
   Share2,
   Trash2,
+  Upload,
   XCircle,
 } from 'lucide-react';
 import {
@@ -116,6 +117,13 @@ export function PresetsPanel({ onOpenModDetail }: PresetsPanelProps) {
     type: 'ok' | 'err';
     text: string;
     skippedMods?: Array<{ id: string; name: string; reason: string }>;
+  } | null>(null);
+
+  // .mrpack / manifest.json import state
+  const [importingPack, setImportingPack] = useState(false);
+  const [importFeedback, setImportFeedback] = useState<{
+    type: 'ok' | 'err';
+    text: string;
   } | null>(null);
 
   const loadData = useCallback(async () => {
@@ -471,6 +479,74 @@ export function PresetsPanel({ onOpenModDetail }: PresetsPanelProps) {
     }
   }
 
+  async function handleImportModpackFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setImportingPack(true);
+    setImportFeedback(null);
+    setError(null);
+    try {
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = '';
+      const chunkSize = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+      }
+      const base64 = btoa(binary);
+
+      const res = await fetch('/api/presets/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: file.name,
+          base64,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'モッドパックの読み込みに失敗しました');
+      }
+
+      await loadData();
+      if (data.preset?.id) {
+        setEditingPresetId(data.preset.id);
+        setCheckedPresetIds((prev) =>
+          prev.includes(data.preset.id) ? prev : [...prev, data.preset.id]
+        );
+      }
+      if (data.mcVersion) {
+        setTargetMcVersion(data.mcVersion);
+      }
+      if (data.loader && TARGET_LOADERS.includes(data.loader)) {
+        setTargetLoader(data.loader);
+      }
+
+      const extraParts: string[] = [];
+      if (data.failedEntries?.length > 0) {
+        extraParts.push(`取得失敗 ${data.failedEntries.length}件`);
+      }
+      if (data.unresolvedCount > 0) {
+        extraParts.push(`未解決 ${data.unresolvedCount}件`);
+      }
+      const extraText = extraParts.length > 0 ? `（${extraParts.join('・')}）` : '';
+
+      setImportFeedback({
+        type: 'ok',
+        text: `「${data.preset?.name ?? file.name}」を作成しました（新規登録 ${data.newlyImportedCount ?? 0}件 / 既存DB ${data.existingMatchedCount ?? 0}件）${extraText}`,
+      });
+    } catch (err) {
+      setImportFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'モッドパックの読み込みに失敗しました',
+      });
+    } finally {
+      setImportingPack(false);
+    }
+  }
+
   async function handleCreatePreset(e: React.FormEvent) {
     e.preventDefault();
     if (!newName.trim()) return;
@@ -654,6 +730,46 @@ export function PresetsPanel({ onOpenModDetail }: PresetsPanelProps) {
                 </button>
               </div>
             </form>
+
+            {/* .mrpack / manifest.json Import */}
+            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-[11px] text-slate-400">
+                  <span className="font-semibold text-slate-200">.mrpack / manifest.json</span>{' '}
+                  から一括取込
+                </div>
+                <label
+                  className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-2.5 py-1.5 text-xs font-semibold text-indigo-200 hover:bg-indigo-500/25 ${
+                    importingPack ? 'pointer-events-none opacity-60' : ''
+                  }`}
+                >
+                  {importingPack ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Upload className="h-3.5 w-3.5" />
+                  )}
+                  {importingPack ? '読込中...' : 'ファイル選択'}
+                  <input
+                    type="file"
+                    accept=".mrpack,.zip,.json"
+                    onChange={handleImportModpackFile}
+                    disabled={importingPack}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+              {importFeedback && (
+                <div
+                  className={`rounded-lg border px-2.5 py-1.5 text-[11px] ${
+                    importFeedback.type === 'ok'
+                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+                      : 'border-rose-500/40 bg-rose-500/10 text-rose-200'
+                  }`}
+                >
+                  {importFeedback.text}
+                </div>
+              )}
+            </div>
 
             {/* Preset Cards */}
             {presets.length === 0 ? (
